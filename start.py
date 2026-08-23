@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 import socket
 import subprocess
 import sys
@@ -61,10 +62,13 @@ def main() -> int:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(BACKEND)
 
-    # Keep the legacy admin123 convenience strictly in the local, no-.env launcher path.
-    # Docker/systemd/direct uvicorn deployments must opt into their own bootstrap password.
+    # Keep all insecure conveniences strictly inside the localhost launcher when no .env is
+    # present. Formal Docker/systemd/direct uvicorn deployments must provide persistent secrets.
+    local_mode = not (ROOT / ".env").exists()
     local_bootstrap = False
-    if not (ROOT / ".env").exists() and not env.get("BOOTSTRAP_ADMIN_PASSWORD"):
+    if local_mode and not env.get("SECRET_KEY"):
+        env["SECRET_KEY"] = secrets.token_hex(32)
+    if local_mode and not env.get("BOOTSTRAP_ADMIN_PASSWORD"):
         env["BOOTSTRAP_ADMIN_PASSWORD"] = "admin123"
         local_bootstrap = True
 
