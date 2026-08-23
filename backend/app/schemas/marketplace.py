@@ -90,3 +90,19 @@ class KeywordUpdate(BaseModel):
     @classmethod
     def validate_timezone(cls, value: str | None) -> str | None:
         return _clean_timezone(value) if value is not None else None
+
+
+class RunCreate(BaseModel):
+    """Optional one-off scan settings. These never mutate the tracked keyword defaults."""
+
+    results_limit: int | None = Field(default=None, ge=10, le=40)
+    platforms: list[Platform] | None = None
+
+    @field_validator("platforms")
+    @classmethod
+    def unique_platforms(cls, value: list[Platform] | None) -> list[Platform] | None:
+        if value is None:
+            return None
+        if not value:
+            raise ValueError("至少选择一个平台")
+        return list(dict.fromkeys(value))
