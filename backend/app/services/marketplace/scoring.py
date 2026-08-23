@@ -239,6 +239,21 @@ def _seller_identity(item: dict[str, Any]) -> str | None:
     return None
 
 
+def _normalized_hhi(weights: list[float]) -> float | None:
+    positive = [max(0.0, float(value)) for value in weights]
+    total = sum(positive)
+    if not positive or total <= 0:
+        return None
+    if len(positive) == 1:
+        return 100.0
+    shares = [value / total for value in positive]
+    hhi = sum(share * share for share in shares)
+    equal_share_hhi = 1.0 / len(shares)
+    if equal_share_hhi >= 1:
+        return 100.0
+    return _clamp((hhi - equal_share_hhi) / (1 - equal_share_hhi) * 100)
+
+
 def _seller_structure(items: list[dict[str, Any]]) -> dict[str, Any]:
     if not items:
         return {
@@ -246,24 +261,30 @@ def _seller_structure(items: list[dict[str, Any]]) -> dict[str, Any]:
             "seller_count": None,
             "top5_listing_share": None,
             "top5_demand_share": None,
+            "listing_hhi": None,
+            "demand_hhi": None,
             "concentration_pressure": None,
             "reliability": 0.0,
         }
 
     identified = [(identity, item) for item in items if (identity := _seller_identity(item))]
     coverage = len(identified) / len(items)
+    listing_counts = Counter(identity for identity, _ in identified)
+    seller_count = len(listing_counts)
     if coverage < 0.5 or len(identified) < 5:
         return {
             "coverage": coverage,
-            "seller_count": len({identity for identity, _ in identified}) or None,
+            "seller_count": seller_count or None,
             "top5_listing_share": None,
             "top5_demand_share": None,
+            "listing_hhi": None,
+            "demand_hhi": None,
             "concentration_pressure": None,
             "reliability": min(1.0, coverage / 0.8),
         }
 
-    listing_counts = Counter(identity for identity, _ in identified)
     top5_listing_share = sum(count for _, count in listing_counts.most_common(5)) / len(identified) * 100
+    listing_hhi = _normalized_hhi([float(count) for count in listing_counts.values()])
 
     sold_rows = [
         (identity, float(item["sold_count"]))
@@ -272,6 +293,7 @@ def _seller_structure(items: list[dict[str, Any]]) -> dict[str, Any]:
     ]
     sold_coverage = len(sold_rows) / len(identified)
     top5_demand_share = None
+    demand_hhi = None
     if sold_coverage >= 0.5:
         sold_by_seller: dict[str, float] = defaultdict(float)
         for identity, sold_count in sold_rows:
@@ -279,16 +301,19 @@ def _seller_structure(items: list[dict[str, Any]]) -> dict[str, Any]:
         total_sold = sum(sold_by_seller.values())
         if total_sold > 0:
             top5_demand_share = sum(sorted(sold_by_seller.values(), reverse=True)[:5]) / total_sold * 100
+            demand_hhi = _normalized_hhi(list(sold_by_seller.values()))
 
-    concentration_share = top5_demand_share if top5_demand_share is not None else top5_listing_share
-    # With 20 distinct sellers the top five naturally account for 25%. Treat that as the
-    # baseline and only penalize concentration above it.
-    concentration_pressure = _clamp((concentration_share - 25) / 55 * 100)
+    # Top-5 shares are useful descriptive metrics, but they have a large mechanical floor
+    # in small samples (five distinct sellers imply Top5=100%). Normalized HHI removes that
+    # floor: equal-sized sellers score 0 regardless of seller count; monopoly scores 100.
+    concentration_pressure = demand_hhi if demand_hhi is not None else listing_hhi
     return {
         "coverage": coverage,
-        "seller_count": len(listing_counts),
+        "seller_count": seller_count,
         "top5_listing_share": top5_listing_share,
         "top5_demand_share": top5_demand_share,
+        "listing_hhi": listing_hhi,
+        "demand_hhi": demand_hhi,
         "concentration_pressure": concentration_pressure,
         "reliability": min(1.0, coverage / 0.8),
     }
@@ -434,6 +459,12 @@ def score_platform(
             "top5_seller_demand_share": (
                 round(seller["top5_demand_share"], 1)
                 if seller["top5_demand_share"] is not None else None
+            ),
+            "seller_listing_hhi": (
+                round(seller["listing_hhi"], 1) if seller["listing_hhi"] is not None else None
+            ),
+            "seller_demand_hhi": (
+                round(seller["demand_hhi"], 1) if seller["demand_hhi"] is not None else None
             ),
             "seller_concentration": (
                 round(seller_pressure, 1) if seller_pressure is not None else None
@@ -659,6 +690,7 @@ def build_analysis(keyword: str, by_platform: dict[str, list[dict[str, Any]]]) -
         "methodology": (
             "公开数据启发式评分：需求信号 40%、进入门槛 35%、价格空间 25%。"
             "进入门槛同时考虑评论门槛、强势商品、广告压力和可识别卖家集中度；"
+            "卖家集中度使用归一化 HHI，避免小样本 Top5 占比天然偏高造成误判；"
             "缺失证据不会被剩余字段放大，而会向中性分收缩。"
             "配件/替换件、明显多件装和低相关搜索漂移会从评分样本中排除；"
             "商品族排序来自重复标题属性的轻量聚类，用于缩小验证范围，不等同于平台官方类目。"
