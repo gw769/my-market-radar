@@ -453,10 +453,18 @@ def _apply_evidence_gate(analysis: dict[str, Any], evidence: dict[str, Any]) -> 
     if grade == "D":
         analysis["opportunity_score"] = None
         analysis["verdict"] = "数据不足"
-        analysis.setdefault("recommendations", []).insert(
+        for segment in analysis.get("opportunity_segments") or []:
+            segment["verdict"] = "数据不足"
+        recommendations = [
+            text
+            for text in (analysis.get("recommendations") or [])
+            if not text.startswith("自动拆分的商品族中，")
+        ]
+        recommendations.insert(
             0,
             "本次证据等级为 D，不输出强选品结论；优先检查采集健康度并补齐样本。",
         )
+        analysis["recommendations"] = recommendations
     elif grade == "C" and analysis.get("verdict") == "建议尝试":
         analysis["verdict"] = "谨慎观察"
         analysis.setdefault("recommendations", []).insert(
