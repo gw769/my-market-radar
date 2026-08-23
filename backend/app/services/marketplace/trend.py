@@ -6,7 +6,8 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.models.marketplace import AnalysisRun, ListingSnapshot
+from app.models.marketplace import AnalysisRun, ListingSnapshot, TrackedKeyword
+from app.services.marketplace.scoring import relevance_score
 
 RESULT_STATUSES = ("completed", "partial")
 MIN_INTERVAL_HOURS = 6.0
@@ -82,6 +83,15 @@ def _summarize_rows(rows: list[dict[str, Any]], current_count: int, interval_hou
     }
 
 
+def _relevant_snapshot_rows(rows: list[ListingSnapshot], keyword: str) -> list[ListingSnapshot]:
+    if not keyword:
+        return []
+    return [
+        row for row in rows
+        if relevance_score(keyword, str(row.title or "")) >= 0.6
+    ]
+
+
 def build_keyword_trend(db: Session, keyword_id: int) -> dict[str, Any]:
     runs = (
         db.query(AnalysisRun)
@@ -105,6 +115,8 @@ def build_keyword_trend(db: Session, keyword_id: int) -> dict[str, Any]:
             "recommendations": [],
         }
 
+    keyword_row = db.query(TrackedKeyword).filter(TrackedKeyword.id == keyword_id).first()
+    keyword_text = str(keyword_row.keyword if keyword_row else "")
     current_run, previous_run = runs[0], runs[1]
     current_time = _run_time(current_run)
     previous_time = _run_time(previous_run)
@@ -114,15 +126,13 @@ def build_keyword_trend(db: Session, keyword_id: int) -> dict[str, Any]:
         else 0.0
     )
 
-    current_rows = (
-        db.query(ListingSnapshot)
-        .filter(ListingSnapshot.run_id == current_run.id)
-        .all()
+    current_rows = _relevant_snapshot_rows(
+        db.query(ListingSnapshot).filter(ListingSnapshot.run_id == current_run.id).all(),
+        keyword_text,
     )
-    previous_rows = (
-        db.query(ListingSnapshot)
-        .filter(ListingSnapshot.run_id == previous_run.id)
-        .all()
+    previous_rows = _relevant_snapshot_rows(
+        db.query(ListingSnapshot).filter(ListingSnapshot.run_id == previous_run.id).all(),
+        keyword_text,
     )
     previous_map = {(row.platform, row.item_id): row for row in previous_rows}
 
@@ -182,7 +192,7 @@ def build_keyword_trend(db: Session, keyword_id: int) -> dict[str, Any]:
     status = "usable" if interval_hours >= MIN_INTERVAL_HOURS and reliability >= 50 else "weak"
     return {
         "status": status,
-        "message": "近期动量来自同平台同 item_id 的两次稳定快照对比。",
+        "message": "近期动量只对比主评分相关性门槛内、同平台同 item_id 的两次稳定快照。",
         "current_run_id": current_run.id,
         "previous_run_id": previous_run.id,
         "interval_hours": round(interval_hours, 2),
