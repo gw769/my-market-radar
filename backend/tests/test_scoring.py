@@ -1,6 +1,11 @@
 import unittest
 
-from app.services.marketplace.scoring import build_analysis, relevance_score, score_platform
+from app.services.marketplace.scoring import (
+    build_analysis,
+    build_opportunity_segments,
+    relevance_score,
+    score_platform,
+)
 
 
 def samples(count: int, sold_base: int = 100, title: str = "water bottle stainless 1L"):
@@ -91,6 +96,56 @@ class ScoringTests(unittest.TestCase):
             item["price"] = 5 if index < 10 else 200
         result = score_platform(items, keyword="water bottle")
         self.assertLess(result["dimensions"]["price_room"], 100)
+
+    def test_seller_concentration_penalizes_head_store_dominance(self):
+        concentrated = samples(20)
+        dispersed = samples(20)
+        for index, item in enumerate(concentrated):
+            item["shop_id"] = "head-store"
+        for index, item in enumerate(dispersed):
+            item["shop_id"] = f"seller-{index}"
+
+        concentrated_result = score_platform(concentrated, keyword="water bottle")
+        dispersed_result = score_platform(dispersed, keyword="water bottle")
+
+        self.assertGreater(
+            concentrated_result["metrics"]["seller_concentration"],
+            dispersed_result["metrics"]["seller_concentration"],
+        )
+        self.assertLess(concentrated_result["score"], dispersed_result["score"])
+        self.assertEqual(concentrated_result["metrics"]["seller_count"], 1)
+        self.assertEqual(dispersed_result["metrics"]["seller_count"], 20)
+
+    def test_missing_seller_identity_does_not_invent_concentration(self):
+        result = score_platform(samples(20), keyword="water bottle")
+        self.assertIsNone(result["metrics"]["seller_concentration"])
+        self.assertEqual(result["metrics"]["seller_identity_coverage"], 0.0)
+
+    def test_repeated_title_attributes_create_rankable_product_segments(self):
+        items = (
+            samples(6, sold_base=600, title="water bottle stainless thermal")
+            + samples(6, sold_base=250, title="water bottle kids straw")
+            + samples(6, sold_base=80, title="water bottle glass portable")
+        )
+        segments = build_opportunity_segments("water bottle", {"shopee": items})
+        labels = {segment["label"] for segment in segments}
+
+        self.assertGreaterEqual(len(segments), 3)
+        self.assertIn("stainless", labels)
+        self.assertIn("kids", labels)
+        self.assertIn("glass", labels)
+        self.assertTrue(all(segment["sample_size"] >= 4 for segment in segments))
+        self.assertGreaterEqual(segments[0]["opportunity_score"], segments[-1]["opportunity_score"])
+
+    def test_analysis_exposes_product_segment_ranking(self):
+        items = (
+            samples(8, sold_base=700, title="water bottle stainless thermal")
+            + samples(8, sold_base=180, title="water bottle kids straw")
+        )
+        analysis = build_analysis("water bottle", {"shopee": items})
+        self.assertIn("opportunity_segments", analysis)
+        self.assertTrue(analysis["opportunity_segments"])
+        self.assertIn("representative_titles", analysis["opportunity_segments"][0])
 
 
 if __name__ == "__main__":
