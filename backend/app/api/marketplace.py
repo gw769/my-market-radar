@@ -133,6 +133,9 @@ def update_keyword(keyword_id: int, payload: KeywordUpdate, db: Session = Depend
 @router.delete("/keywords/{keyword_id}")
 def delete_keyword(keyword_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     keyword = _owned_keyword(db, current_user.id, keyword_id)
+    running = db.query(AnalysisRun).filter(AnalysisRun.keyword_id == keyword.id, AnalysisRun.status == "running").first()
+    if running:
+        raise HTTPException(status_code=409, detail="当前关键词正在采集，任务结束或暂停后再删除")
     db.delete(keyword)
     db.commit()
     return {"success": True}
@@ -186,11 +189,23 @@ def resume_run(run_id: int, db: Session = Depends(get_db), current_user: User = 
     run = _owned_run(db, current_user.id, run_id)
     if run.status not in ("needs_verification", "failed", "partial"):
         raise HTTPException(status_code=409, detail="当前任务不能继续")
+
+    if run.status in ("failed", "partial"):
+        # A retry is a new attempt. Reusing the same row erased the old result, timestamps and
+        # snapshots, which made history/trends impossible to trust.
+        keyword = run.tracked_keyword
+        retry = create_run(db, keyword, trigger="retry")
+        queued = submit_run(retry.id)
+        return {"success": True, "queued": queued, "run": _run_payload(retry), "retry_of": run.id}
+
+    # Verification is a pause inside the same attempt, so continue the same run. submit_run()
+    # is race-safe if the previous worker is still leaving the in-memory queue.
     run.status = "pending"
     run.progress = 0
-    run.current_step = "等待重新采集"
+    run.current_step = "等待验证后重新采集"
     run.error_message = None
     run.verification_platform = None
+    run.completed_at = None
     db.commit()
     queued = submit_run(run.id)
     return {"success": True, "queued": queued, "run": _run_payload(run)}
