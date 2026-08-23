@@ -6,9 +6,13 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     APP_NAME: str = "MY Marketplace Analyzer"
-    APP_VERSION: str = "1.0.1"
+    APP_VERSION: str = "1.0.2"
     DEBUG: bool = False
     SECRET_KEY: str = "dev-secret-key-change-in-production"
+
+    BOOTSTRAP_ADMIN_USERNAME: str = "admin"
+    BOOTSTRAP_ADMIN_EMAIL: str = "admin@market.my"
+    BOOTSTRAP_ADMIN_PASSWORD: str = ""
 
     DATA_DIR: str = ""
     DATABASE_TYPE: str = "sqlite"
