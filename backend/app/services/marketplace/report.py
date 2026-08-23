@@ -10,6 +10,7 @@ from app.models.marketplace import AnalysisRun, ListingSnapshot
 
 HEADER_FILL = PatternFill("solid", fgColor="0F766E")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
+RESULT_STATUSES = ("completed", "partial")
 
 
 def _header(ws, labels: list[str]) -> None:
@@ -32,6 +33,12 @@ def build_report(db: Session, run: AnalysisRun) -> BytesIO:
     summary.append(["结论", run.verdict or "数据不足"])
     summary.append(["数据完整度", f"{run.confidence or 0:.1f}%"])
     summary.append(["数据口径", "公开搜索结果快照；不是利润、真实月销量或转化率预测。"])
+    request_config = (run.analysis or {}).get("request_config") or {}
+    if request_config:
+        summary.append([
+            "本次扫描配置",
+            f"平台 {', '.join(request_config.get('platforms') or [])}；每平台上限 {request_config.get('results_limit', '—')} 条",
+        ])
     for platform, score in (run.platform_scores or {}).items():
         platform_score = score.get("score") if score.get("eligible", True) else "—"
         raw_sample = score.get("raw_sample_size", score.get("sample_size", 0))
@@ -66,7 +73,19 @@ def build_report(db: Session, run: AnalysisRun) -> BytesIO:
 
     trend = wb.create_sheet("每日价格与排名趋势")
     _header(trend, ["采集时间", "平台", "商品ID", "商品", "价格(MYR)", "公开已售", "评论数", "搜索排名"])
-    history = db.query(ListingSnapshot).filter(ListingSnapshot.keyword_id == keyword.id).order_by(ListingSnapshot.collected_at).all()
+    # Checkpoints from running/verification/failed attempts are intentionally excluded. They
+    # are useful for recovery, but are not stable historical observations and previously made
+    # an old exported workbook change depending on whatever job happened to be running now.
+    history = (
+        db.query(ListingSnapshot)
+        .join(AnalysisRun, ListingSnapshot.run_id == AnalysisRun.id)
+        .filter(
+            ListingSnapshot.keyword_id == keyword.id,
+            AnalysisRun.status.in_(RESULT_STATUSES),
+        )
+        .order_by(ListingSnapshot.collected_at, ListingSnapshot.id)
+        .all()
+    )
     for item in history:
         trend.append([item.collected_at.isoformat() if item.collected_at else "—", item.platform, item.item_id, item.title, item.price if item.price is not None else "—", item.sold_count if item.sold_count is not None else "—", item.review_count if item.review_count is not None else "—", item.search_rank])
 
@@ -76,6 +95,7 @@ def build_report(db: Session, run: AnalysisRun) -> BytesIO:
     notes.append(["机会分", "需求信号40%、进入门槛35%、价格空间25%的证据门槛启发式评分。"])
     notes.append(["缺失值", "公开页面未提供的字段不会填0，也不会把剩余权重放大；证据不足时不输出强结论。"])
     notes.append(["相关性", "低关键词相关性的搜索漂移结果会保留在原始快照，但从机会评分样本中排除。"])
+    notes.append(["趋势", "仅纳入 completed/partial 任务；运行中、验证码暂停与失败任务的恢复 checkpoint 不进入趋势。"])
     notes.append(["跨平台", "所选平台分别评分；原始已售数字不直接跨平台比较。"])
 
     output = BytesIO()

@@ -87,8 +87,7 @@ def _safe_rating(value: Any) -> float | None:
     return rating if 0 <= rating <= 5 else None
 
 
-# A singular label such as "4.8 rating" usually describes the rating score, not a count.
-# Only plural "ratings" is accepted as a count label; reviews and Malay count labels remain valid.
+# A singular label such as "4.8 rating" normally describes the score, not a count.
 _REVIEW_PATTERNS = (
     r"([0-9,.]+\s*[km]?)\s*(?:reviews?|ratings|ulasan|penilaian)\b",
 )
@@ -107,12 +106,27 @@ class MarketplaceAdapter:
 
     def is_verification_page(self, url: str, body_text: str = "") -> bool:
         parsed = urlparse(url)
-        haystack = f"{parsed.netloc} {parsed.path} {body_text[:1600]}".lower()
-        signals = (
-            "captcha", "verify", "verification", "punish", "robot check",
-            "security check", "unusual traffic", "suspicious activity", "drag the slider",
+        host = parsed.netloc.lower()
+        path = parsed.path.lower()
+        body = body_text[:2500].lower()
+        if any(blocked in host for blocked in self.blocked_hosts):
+            return True
+
+        # Avoid generic substring checks such as "verify": normal marketplace pages commonly
+        # contain text like "Verified Seller", which previously paused valid runs as captcha.
+        path_signals = (
+            "/verify", "/verification", "/captcha", "/punish", "/security-check",
+            "/security_check", "/challenge",
         )
-        return any(host in parsed.netloc.lower() for host in self.blocked_hosts) or any(s in haystack for s in signals)
+        if any(signal in path for signal in path_signals):
+            return True
+
+        body_signals = (
+            "captcha", "verification required", "please verify", "verify to continue",
+            "verify your identity", "robot check", "security check", "unusual traffic",
+            "suspicious activity", "drag the slider", "slide to verify", "complete verification",
+        )
+        return any(signal in body for signal in body_signals)
 
     def parse_cards(self, cards: list[dict[str, Any]], limit: int) -> list[MarketplaceListing]:
         results: list[MarketplaceListing] = []

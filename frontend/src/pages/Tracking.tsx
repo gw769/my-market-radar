@@ -6,6 +6,8 @@ import StatusBadge from "@/components/StatusBadge";
 import type { Keyword } from "@/types";
 
 const ACTIVE_RUNS = new Set(["pending", "running", "needs_verification"]);
+const DELETE_BLOCKED_RUNS = new Set(["pending", "running"]);
+const RESULT_RUNS = new Set(["completed", "partial"]);
 
 export default function Tracking() {
   const [params] = useSearchParams();
@@ -53,6 +55,9 @@ export default function Tracking() {
       {keywords.map((item) => {
         const run = item.latest_run;
         const active = Boolean(run && ACTIVE_RUNS.has(run.status));
+        const deleteBlocked = Boolean(run && DELETE_BLOCKED_RUNS.has(run.status));
+        const resultRun = run && RESULT_RUNS.has(run.status) ? run : item.latest_result_run;
+        const showingOlderScore = Boolean(run && resultRun && run.id !== resultRun.id);
         return <article key={item.id} className={`tracking-card ${run?.id === highlighted ? "highlight" : ""}`}>
           <div className="tracking-main">
             <div className="keyword-monogram">{item.keyword.slice(0, 2).toUpperCase()}</div>
@@ -60,23 +65,31 @@ export default function Tracking() {
           </div>
           <div className="tracking-status">
             {run && <StatusBadge status={run.status} />}
-            <div className="progress-track"><i style={{ width: `${run?.progress || 0}%` }} /></div>
+            <div className="progress-track"><i style={{ width: `${run?.progress ?? 0}%` }} /></div>
             <small>{run?.current_step || "尚未运行"}</small>
           </div>
-          <div className="tracking-score"><strong>{run?.opportunity_score ?? "—"}</strong><span>{run?.verdict || "等待结论"}</span></div>
+          <div className="tracking-score">
+            <strong>{resultRun?.opportunity_score ?? "—"}</strong>
+            <span>{resultRun?.verdict || "等待结论"}{showingOlderScore ? " · 上次结果" : ""}</span>
+          </div>
           <div className="tracking-actions">
             {run?.status === "needs_verification" && <>
               <button title="打开验证浏览器" onClick={() => action(() => apiPost(`/runs/${run.id}/verification-browser`), "验证浏览器已打开；验证完成后保持窗口打开。") }><Monitor /><span>验证</span></button>
               <button title="验证完成后继续采集" onClick={() => queuedAction(() => apiPost(`/runs/${run.id}/resume`), "正在从验证浏览器继续采集") }><Play /><span>继续</span></button>
             </>}
-            {(run?.status === "failed" || run?.status === "partial") && <button title="重试本次任务" onClick={() => queuedAction(() => apiPost(`/runs/${run.id}/resume`), "已重新加入采集队列") }><Play /><span>重试</span></button>}
+            {(run?.status === "failed" || run?.status === "partial") && <button title="创建新的重试任务" onClick={() => queuedAction(() => apiPost(`/runs/${run.id}/resume`), "已创建新的重试任务") }><Play /><span>重试</span></button>}
             <button
               title={active ? "当前任务尚未结束" : "立即更新"}
               disabled={active}
               onClick={() => queuedAction(() => apiPost(`/keywords/${item.id}/runs`), "已加入采集队列")}
             ><RefreshCw /><span>更新</span></button>
             <button title={item.tracking_enabled ? "暂停每日跟踪" : "启用每日跟踪"} onClick={() => action(() => apiPatch(`/keywords/${item.id}`, { tracking_enabled: !item.tracking_enabled }), item.tracking_enabled ? "已暂停" : "已启用")}>{item.tracking_enabled ? <Pause /> : <Play />}<span>{item.tracking_enabled ? "暂停" : "启用"}</span></button>
-            <button title="删除" className="danger" onClick={() => action(() => apiDelete(`/keywords/${item.id}`), "已删除") }><Trash2 /><span>删除</span></button>
+            <button
+              title={deleteBlocked ? "任务正在排队或采集中，暂不能删除" : "删除"}
+              disabled={deleteBlocked}
+              className="danger"
+              onClick={() => action(() => apiDelete(`/keywords/${item.id}`), "已删除")}
+            ><Trash2 /><span>删除</span></button>
           </div>
           {run?.error_message && <div className="run-error">{run.error_message}</div>}
         </article>;

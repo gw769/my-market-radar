@@ -27,15 +27,30 @@ from app.services.marketplace.recovery import recover_interrupted_runs
 from app.services.marketplace.scheduler import start_scheduler, stop_scheduler
 
 settings = get_settings()
+KNOWN_INSECURE_SECRET_KEYS = {
+    "",
+    "dev-secret-key-change-in-production",
+    "please-change-me-to-a-random-32-char-string",
+}
 
 _frontend_out = _base_dir / "frontend" / "dist"
 if not _frontend_out.exists():
     _frontend_out = _project_root / "frontend" / "dist"
 
 
+def _validate_runtime_security() -> None:
+    secret = settings.SECRET_KEY.strip()
+    if secret in KNOWN_INSECURE_SECRET_KEYS or len(secret) < 32:
+        raise RuntimeError(
+            "SECRET_KEY 未安全配置。正式启动前请在 .env 设置至少 32 个字符的随机私密字符串；"
+            "本机无 .env 的 start.py 会自动生成临时本地密钥。"
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("应用启动中...")
+    _validate_runtime_security()
     init_db()
     logger.info("数据库初始化完成")
     _ensure_default_admin()
@@ -47,27 +62,38 @@ async def lifespan(app: FastAPI):
 
 
 def _ensure_default_admin():
-    """首次启动时自动创建默认管理员账户"""
+    """Bootstrap the very first account only when an explicit password is configured."""
     from app.core.database import SessionLocal
     from app.core.security import get_password_hash
     from app.models.user import User
 
     db = SessionLocal()
     try:
-        existing = db.query(User).filter(User.email == "admin@market.my").first()
-        if not existing:
-            admin = User(
-                username="admin",
-                email="admin@market.my",
-                password_hash=get_password_hash("admin123"),
+        if db.query(User).first():
+            logger.info("已有用户账户，跳过管理员引导")
+            return
+
+        password = settings.BOOTSTRAP_ADMIN_PASSWORD
+        if not password:
+            logger.warning(
+                "数据库尚无用户，但未设置 BOOTSTRAP_ADMIN_PASSWORD；不会自动创建已知默认密码账户"
             )
-            db.add(admin)
-            db.commit()
-            logger.info("默认管理员已创建: admin@market.my / admin123")
-        else:
-            logger.info("管理员账户已存在，跳过创建")
-    except Exception as e:
-        logger.error(f"创建默认管理员失败: {e}")
+            return
+        if len(password) < 6:
+            logger.error("BOOTSTRAP_ADMIN_PASSWORD 至少需要 6 个字符，管理员账户未创建")
+            return
+
+        admin = User(
+            username=settings.BOOTSTRAP_ADMIN_USERNAME,
+            email=settings.BOOTSTRAP_ADMIN_EMAIL,
+            password_hash=get_password_hash(password),
+        )
+        db.add(admin)
+        db.commit()
+        logger.info("首次管理员已创建: %s", settings.BOOTSTRAP_ADMIN_EMAIL)
+    except Exception as exc:
+        db.rollback()
+        logger.error("创建首次管理员失败: %s", exc, exc_info=True)
     finally:
         db.close()
 
@@ -83,7 +109,6 @@ app = FastAPI(
 
 @app.exception_handler(AppException)
 async def app_exception_handler(request: Request, exc: AppException):
-    """处理自定义应用异常"""
     logger.warning(f"应用异常 [{exc.status_code}]: {exc.detail} - {request.url}")
     return JSONResponse(
         status_code=exc.status_code,
@@ -93,7 +118,6 @@ async def app_exception_handler(request: Request, exc: AppException):
 
 @app.exception_handler(FastAPIHTTPException)
 async def http_exception_handler(request: Request, exc: FastAPIHTTPException):
-    """处理FastAPI HTTP异常（含验证错误）"""
     logger.warning(f"HTTP异常 [{exc.status_code}]: {exc.detail} - {request.url}")
     return JSONResponse(
         status_code=exc.status_code,
@@ -103,7 +127,6 @@ async def http_exception_handler(request: Request, exc: FastAPIHTTPException):
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    """处理未捕获的全局异常"""
     logger.error(f"未处理异常: {str(exc)} - {request.url}", exc_info=True)
     return JSONResponse(
         status_code=500,

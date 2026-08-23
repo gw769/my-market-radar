@@ -4,6 +4,7 @@ import { apiGet } from "@/lib/api";
 import type { Keyword, OpportunitySegment, PlatformScore } from "@/types";
 
 const dimLabels: Record<string,string> = { demand: "需求信号", entry_ease: "进入可行性", price_room: "价格空间" };
+const RESULT_STATUSES = new Set(["completed", "partial"]);
 
 export default function AIAnalysis() {
   const [keywords, setKeywords] = useState<Keyword[]>([]);
@@ -17,9 +18,13 @@ export default function AIAnalysis() {
   }, []);
 
   const item = keywords.find((x) => x.id === keywordId);
-  const run = item?.latest_run;
+  const latestRun = item?.latest_run;
+  const run = latestRun && RESULT_STATUSES.has(latestRun.status)
+    ? latestRun
+    : item?.latest_result_run;
   const analysis = run?.analysis || {};
   const segments = (analysis.opportunity_segments || []) as OpportunitySegment[];
+  const showingOlderResult = Boolean(latestRun && run && latestRun.id !== run.id);
 
   return <div className="page-stack">
     <section className="section-heading">
@@ -33,7 +38,9 @@ export default function AIAnalysis() {
       </select>
     </section>
 
-    {!run || !["completed","partial"].includes(run.status) ? <div className="empty-state panel">请选择一个已完成的分析任务。</div> : <>
+    {showingOlderResult && <div className="info-box">最新任务状态：{latestRun?.status}。当前先展示最近一次可用分析结果，完成后会自动替换。</div>}
+
+    {!run ? <div className="empty-state panel">这个关键词还没有可用的分析结果。</div> : <>
       <section className="score-banner panel">
         <div className="score-orb"><span>机会分</span><strong>{run.opportunity_score ?? "—"}</strong><small>完整度 {run.confidence ?? 0}%</small></div>
         <div><span className="eyebrow">VERDICT</span><h3>{run.verdict}</h3><p>{analysis.methodology}</p></div>

@@ -12,12 +12,27 @@ if not exist ".env" (
     echo.
     echo   Step 1: open a cmd window here and run:
     echo          copy .env.docker.simple .env
-    echo   Step 2: edit .env and set a secure SECRET_KEY
+    echo   Step 2: edit .env and set SECRET_KEY and BOOTSTRAP_ADMIN_PASSWORD
     echo.
     pause
     exit /b 1
 )
 echo [OK] .env found.
+
+REM Validate secrets in PowerShell so strong passwords containing !, %, ^, &, = etc. are not
+REM mangled by cmd.exe delayed expansion / token parsing.
+powershell -NoProfile -Command ^
+  "$cfg=@{}; Get-Content -LiteralPath '.env' | ForEach-Object { $line=$_.Trim(); if($line -and -not $line.StartsWith('#') -and $line.Contains('=')){ $p=$line.Split('=',2); $cfg[$p[0].Trim()]=$p[1] } };" ^
+  "if([string]::IsNullOrWhiteSpace($cfg['BOOTSTRAP_ADMIN_PASSWORD'])){ Write-Host '[ERROR] BOOTSTRAP_ADMIN_PASSWORD is empty in .env.'; exit 1 };" ^
+  "if([string]::IsNullOrWhiteSpace($cfg['SECRET_KEY'])){ Write-Host '[ERROR] SECRET_KEY is empty in .env.'; exit 1 };" ^
+  "if($cfg['SECRET_KEY'] -eq 'please-change-me-to-a-random-32-char-string'){ Write-Host '[ERROR] SECRET_KEY still uses the template value.'; exit 1 };" ^
+  "exit 0"
+if errorlevel 1 (
+    echo   Fix .env before starting Docker.
+    pause
+    exit /b 1
+)
+echo [OK] Bootstrap credentials and secret are configured.
 
 where docker >nul 2>&1
 if errorlevel 1 (
@@ -38,7 +53,7 @@ if errorlevel 1 (
 )
 echo [OK] Docker engine is running.
 
-echo [INFO] Building and starting container (first build takes 5-10 min)...
+echo [INFO] Building and starting container...
 echo.
 docker compose -f docker-compose.simple.yml up -d --build
 if errorlevel 1 (
@@ -56,7 +71,7 @@ set /a tries+=1
 powershell -Command "try { $r = Invoke-WebRequest -Uri 'http://localhost:8011/health' -UseBasicParsing -TimeoutSec 3; if ($r.StatusCode -eq 200) { exit 0 } else { exit 1 } } catch { exit 1 }" >nul 2>&1
 if errorlevel 1 (
     if %tries% geq 60 (
-        echo [WARN] Backend not ready after 5 min. Please open http://localhost:8011 manually.
+        echo [WARN] Backend not ready after 5 min. Please inspect: docker logs my-market-radar
         goto opendone
     )
     echo [INFO] Backend starting, retrying (%tries%)...
@@ -77,7 +92,7 @@ echo.
 echo ================================================================
 echo   SERVICE IS RUNNING
  echo   Open:  http://localhost:8011
- echo   Login: admin@market.my / admin123
+ echo   Login: BOOTSTRAP_ADMIN_EMAIL / BOOTSTRAP_ADMIN_PASSWORD from .env
  echo   Stop:  double-click stop_docker.bat
  echo   Network: localhost only by default
  echo ================================================================

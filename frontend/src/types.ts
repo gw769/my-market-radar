@@ -23,7 +23,8 @@ export interface OpportunitySegment {
 export interface Keyword {
   id: number; keyword: string; platforms: string[]; results_limit: number;
   tracking_enabled: boolean; daily_time: string; timezone: string;
-  last_run_at?: string; last_success_at?: string; next_run_at?: string; latest_run?: Run | null;
+  last_run_at?: string; last_success_at?: string; next_run_at?: string;
+  latest_run?: Run | null; latest_result_run?: Run | null;
 }
 export interface Listing {
   id: number; platform: string; item_id: string; title: string; product_url: string; image_url?: string;

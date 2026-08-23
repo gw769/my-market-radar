@@ -8,6 +8,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.security import get_current_user
 from app.models.marketplace import AnalysisRun, ListingSnapshot, TrackedKeyword
@@ -18,6 +19,8 @@ from app.services.marketplace.runner import create_run, open_verification_browse
 from app.services.marketplace.scheduler import next_run_utc
 
 router = APIRouter(prefix="/api", tags=["Malaysia marketplace intelligence"])
+settings = get_settings()
+RESULT_STATUSES = ("completed", "partial")
 
 
 def _iso(value):
@@ -26,7 +29,11 @@ def _iso(value):
     return value.replace(tzinfo=timezone.utc).isoformat() if value.tzinfo is None else value.isoformat()
 
 
-def _keyword_payload(keyword: TrackedKeyword, latest: AnalysisRun | None = None) -> dict:
+def _keyword_payload(
+    keyword: TrackedKeyword,
+    latest: AnalysisRun | None = None,
+    latest_result: AnalysisRun | None = None,
+) -> dict:
     return {
         "id": keyword.id,
         "keyword": keyword.keyword,
@@ -39,6 +46,7 @@ def _keyword_payload(keyword: TrackedKeyword, latest: AnalysisRun | None = None)
         "last_success_at": _iso(keyword.last_success_at),
         "next_run_at": _iso(keyword.next_run_at),
         "latest_run": _run_payload(latest) if latest else None,
+        "latest_result_run": _run_payload(latest_result) if latest_result else None,
     }
 
 
@@ -64,6 +72,15 @@ def _run_payload(run: AnalysisRun) -> dict:
     }
 
 
+def _latest_result(db: Session, keyword_id: int) -> AnalysisRun | None:
+    return (
+        db.query(AnalysisRun)
+        .filter(AnalysisRun.keyword_id == keyword_id, AnalysisRun.status.in_(RESULT_STATUSES))
+        .order_by(AnalysisRun.id.desc())
+        .first()
+    )
+
+
 def _owned_keyword(db: Session, user_id: int, keyword_id: int) -> TrackedKeyword:
     keyword = db.query(TrackedKeyword).filter(TrackedKeyword.id == keyword_id, TrackedKeyword.user_id == user_id).first()
     if not keyword:
@@ -87,6 +104,19 @@ def _apply_keyword_settings(keyword: TrackedKeyword, payload: KeywordCreate) -> 
     keyword.next_run_at = next_run_utc(payload.daily_time, payload.timezone) if payload.tracking_enabled else None
 
 
+@router.get("/marketplace-defaults")
+def marketplace_defaults(current_user: User = Depends(get_current_user)):
+    return {
+        "success": True,
+        "data": {
+            "results_limit": settings.DEFAULT_RESULTS_LIMIT,
+            "daily_time": settings.DEFAULT_DAILY_TIME,
+            "timezone": settings.DEFAULT_TIMEZONE,
+            "platforms": ["shopee", "lazada"],
+        },
+    }
+
+
 @router.post("/keywords")
 def add_keyword(payload: KeywordCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     existing = db.query(TrackedKeyword).filter(func.lower(TrackedKeyword.keyword) == payload.keyword.lower(), TrackedKeyword.user_id == current_user.id).first()
@@ -94,9 +124,10 @@ def add_keyword(payload: KeywordCreate, db: Session = Depends(get_db), current_u
         _apply_keyword_settings(existing, payload)
         db.commit()
         db.refresh(existing)
+        previous_result = _latest_result(db, existing.id)
         run = create_run(db, existing, trigger="manual")
         queued = submit_run(run.id)
-        return {"success": True, "queued": queued, "keyword": _keyword_payload(existing, run), "run": _run_payload(run)}
+        return {"success": True, "queued": queued, "keyword": _keyword_payload(existing, run, previous_result), "run": _run_payload(run)}
 
     keyword = TrackedKeyword(user_id=current_user.id, keyword=payload.keyword)
     _apply_keyword_settings(keyword, payload)
@@ -105,7 +136,7 @@ def add_keyword(payload: KeywordCreate, db: Session = Depends(get_db), current_u
     db.refresh(keyword)
     run = create_run(db, keyword, trigger="manual")
     queued = submit_run(run.id)
-    return {"success": True, "queued": queued, "keyword": _keyword_payload(keyword, run), "run": _run_payload(run)}
+    return {"success": True, "queued": queued, "keyword": _keyword_payload(keyword, run, None), "run": _run_payload(run)}
 
 
 @router.get("/keywords")
@@ -114,7 +145,7 @@ def list_keywords(db: Session = Depends(get_db), current_user: User = Depends(ge
     data = []
     for keyword in keywords:
         latest = db.query(AnalysisRun).filter(AnalysisRun.keyword_id == keyword.id).order_by(AnalysisRun.id.desc()).first()
-        data.append(_keyword_payload(keyword, latest))
+        data.append(_keyword_payload(keyword, latest, _latest_result(db, keyword.id)))
     return {"success": True, "data": data}
 
 
@@ -127,12 +158,18 @@ def update_keyword(keyword_id: int, payload: KeywordUpdate, db: Session = Depend
     db.commit()
     db.refresh(keyword)
     latest = db.query(AnalysisRun).filter(AnalysisRun.keyword_id == keyword.id).order_by(AnalysisRun.id.desc()).first()
-    return {"success": True, "data": _keyword_payload(keyword, latest)}
+    return {"success": True, "data": _keyword_payload(keyword, latest, _latest_result(db, keyword.id))}
 
 
 @router.delete("/keywords/{keyword_id}")
 def delete_keyword(keyword_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     keyword = _owned_keyword(db, current_user.id, keyword_id)
+    active = db.query(AnalysisRun).filter(
+        AnalysisRun.keyword_id == keyword.id,
+        AnalysisRun.status.in_(("pending", "running")),
+    ).first()
+    if active:
+        raise HTTPException(status_code=409, detail="当前关键词正在采集队列中，任务结束或暂停后再删除")
     db.delete(keyword)
     db.commit()
     return {"success": True}
@@ -186,11 +223,19 @@ def resume_run(run_id: int, db: Session = Depends(get_db), current_user: User = 
     run = _owned_run(db, current_user.id, run_id)
     if run.status not in ("needs_verification", "failed", "partial"):
         raise HTTPException(status_code=409, detail="当前任务不能继续")
+
+    if run.status in ("failed", "partial"):
+        keyword = run.tracked_keyword
+        retry = create_run(db, keyword, trigger="retry")
+        queued = submit_run(retry.id)
+        return {"success": True, "queued": queued, "run": _run_payload(retry), "retry_of": run.id}
+
     run.status = "pending"
     run.progress = 0
-    run.current_step = "等待重新采集"
+    run.current_step = "等待验证后重新采集"
     run.error_message = None
     run.verification_platform = None
+    run.completed_at = None
     db.commit()
     queued = submit_run(run.id)
     return {"success": True, "queued": queued, "run": _run_payload(run)}
@@ -199,7 +244,7 @@ def resume_run(run_id: int, db: Session = Depends(get_db), current_user: User = 
 @router.get("/runs/{run_id}/report.xlsx")
 def report(run_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     run = _owned_run(db, current_user.id, run_id)
-    if run.status not in ("completed", "partial"):
+    if run.status not in RESULT_STATUSES:
         raise HTTPException(status_code=409, detail="任务尚未完成")
     output = build_report(db, run)
     filename = quote(f"{run.tracked_keyword.keyword}_MY_marketplace.xlsx")
@@ -210,14 +255,38 @@ def report(run_id: int, db: Session = Depends(get_db), current_user: User = Depe
 def dashboard(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     keywords = db.query(TrackedKeyword).filter(TrackedKeyword.user_id == current_user.id).all()
     keyword_ids = [item.id for item in keywords]
-    runs = db.query(AnalysisRun).filter(AnalysisRun.keyword_id.in_(keyword_ids)).order_by(AnalysisRun.id.desc()).limit(50).all() if keyword_ids else []
-    completed_ids = [run.id for run in runs if run.status in ("completed", "partial")]
-    platform_counts = dict(db.query(ListingSnapshot.platform, func.count(ListingSnapshot.id)).filter(ListingSnapshot.run_id.in_(completed_ids)).group_by(ListingSnapshot.platform).all()) if completed_ids else {}
+    if not keyword_ids:
+        return {"success": True, "data": {
+            "keyword_count": 0, "tracking_count": 0, "needs_verification": 0,
+            "completed_runs": 0, "platform_counts": {}, "latest_runs": [], "score_history": [],
+        }}
+
+    run_base = db.query(AnalysisRun).filter(AnalysisRun.keyword_id.in_(keyword_ids))
+    completed_runs = run_base.filter(AnalysisRun.status.in_(RESULT_STATUSES)).count()
+    needs_verification = run_base.filter(AnalysisRun.status == "needs_verification").count()
+
+    recent_runs = run_base.order_by(AnalysisRun.id.desc()).limit(50).all()
+    latest_runs = recent_runs[:8]
+    score_history = [
+        {"run_id": run.id, "keyword": run.tracked_keyword.keyword, "score": run.opportunity_score, "created_at": _iso(run.created_at)}
+        for run in reversed(recent_runs)
+        if run.status in RESULT_STATUSES and run.opportunity_score is not None
+    ][-30:]
+
+    stable_run_ids = [result.id for keyword in keywords if (result := _latest_result(db, keyword.id))]
+    platform_counts = dict(
+        db.query(ListingSnapshot.platform, func.count(ListingSnapshot.id))
+        .filter(ListingSnapshot.run_id.in_(stable_run_ids))
+        .group_by(ListingSnapshot.platform)
+        .all()
+    ) if stable_run_ids else {}
+
     return {"success": True, "data": {
-        "keyword_count": len(keywords), "tracking_count": sum(bool(x.tracking_enabled) for x in keywords),
-        "needs_verification": sum(x.status == "needs_verification" for x in runs),
-        "completed_runs": sum(x.status in ("completed", "partial") for x in runs),
+        "keyword_count": len(keywords),
+        "tracking_count": sum(bool(item.tracking_enabled) for item in keywords),
+        "needs_verification": needs_verification,
+        "completed_runs": completed_runs,
         "platform_counts": platform_counts,
-        "latest_runs": [_run_payload(run) for run in runs[:8]],
-        "score_history": [{"run_id": run.id, "keyword": run.tracked_keyword.keyword, "score": run.opportunity_score, "created_at": _iso(run.created_at)} for run in reversed(runs) if run.opportunity_score is not None][-30:],
+        "latest_runs": [_run_payload(run) for run in latest_runs],
+        "score_history": score_history,
     }}

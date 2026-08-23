@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.logging import logger
 from app.core.security import (
@@ -14,11 +15,18 @@ from app.models.user import User
 from app.schemas.user import UserCreate, UserLogin, UserResponse
 
 router = APIRouter(prefix="/api/auth", tags=["认证"])
+settings = get_settings()
 
 
 @router.post("/register")
 def register(user_data: UserCreate, db: Session = Depends(get_db)):
-    logger.info(f"用户注册尝试: {user_data.email}")
+    if not settings.ALLOW_REGISTRATION:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="当前部署未开放自助注册",
+        )
+
+    logger.info("用户注册尝试: %s", user_data.email)
 
     user = db.query(User).filter(User.email == user_data.email).first()
     if user:
@@ -38,7 +46,7 @@ def register(user_data: UserCreate, db: Session = Depends(get_db)):
     db.refresh(user)
 
     access_token = create_access_token(data={"sub": user.id})
-    logger.info(f"用户注册成功: {user.email}")
+    logger.info("用户注册成功: %s", user.email)
 
     return {
         "access_token": access_token,
@@ -49,7 +57,7 @@ def register(user_data: UserCreate, db: Session = Depends(get_db)):
 
 @router.post("/login")
 def login(login_data: UserLogin, db: Session = Depends(get_db)):
-    logger.info(f"登录尝试: {login_data.email}")
+    logger.info("登录尝试: %s", login_data.email)
 
     user = db.query(User).filter(User.email == login_data.email).first()
 
@@ -57,7 +65,7 @@ def login(login_data: UserLogin, db: Session = Depends(get_db)):
         return JSONResponse(status_code=401, content={"success": False, "message": "邮箱或密码错误"})
 
     access_token = create_access_token(data={"sub": user.id})
-    logger.info(f"用户登录成功: {user.email}")
+    logger.info("用户登录成功: %s", user.email)
 
     return {
         "access_token": access_token,

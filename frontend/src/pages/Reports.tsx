@@ -1,12 +1,37 @@
 import { useEffect, useState } from "react";
 import { Download, FileSpreadsheet } from "lucide-react";
 import { apiGet, downloadAuthorized } from "@/lib/api";
-import type { Keyword } from "@/types";
+import type { Keyword, Run } from "@/types";
 
 export default function Reports() {
-  const [keywords, setKeywords] = useState<Keyword[]>([]); const [message, setMessage] = useState("");
+  const [keywords, setKeywords] = useState<Keyword[]>([]);
+  const [message, setMessage] = useState("");
   useEffect(() => { apiGet<any>("/keywords").then((r) => setKeywords(r.data || [])); }, []);
-  const ready = keywords.filter((x) => x.latest_run && ["completed","partial"].includes(x.latest_run.status));
-  const download = async (item: Keyword) => { try { await downloadAuthorized(`/runs/${item.latest_run!.id}/report.xlsx`, `${item.keyword}_MY_marketplace.xlsx`); setMessage("报告已下载"); } catch (e: any) { setMessage(e.message); } };
-  return <div className="page-stack"><section className="section-heading"><div><span className="eyebrow">PORTABLE WORKBOOKS</span><h2>Excel 报告</h2><p>综合结论、双平台竞品、每日趋势和数据口径说明一次打包。</p></div></section>{message && <div className="info-box">{message}</div>}<div className="report-grid">{ready.map((item) => <article className="report-card panel" key={item.id}><div className="file-icon"><FileSpreadsheet /></div><div><span>MY MARKETPLACE · XLSX</span><h3>{item.keyword}</h3><p>{item.latest_run!.analysis?.counts?.shopee || 0} Shopee + {item.latest_run!.analysis?.counts?.lazada || 0} Lazada</p></div><div className="report-score"><strong>{item.latest_run!.opportunity_score ?? "—"}</strong><span>{item.latest_run!.verdict}</span></div><button onClick={() => download(item)}><Download />下载</button></article>)}{ready.length === 0 && <div className="empty-state panel">还没有可下载的报告。</div>}</div></div>;
+
+  const ready = keywords
+    .map((item) => ({ item, run: item.latest_result_run || null }))
+    .filter((entry): entry is { item: Keyword; run: Run } => Boolean(entry.run));
+
+  const download = async (item: Keyword, run: Run) => {
+    try {
+      await downloadAuthorized(`/runs/${run.id}/report.xlsx`, `${item.keyword}_MY_marketplace.xlsx`);
+      setMessage("报告已下载");
+    } catch (e: any) {
+      setMessage(e.message || "下载失败");
+    }
+  };
+
+  return <div className="page-stack">
+    <section className="section-heading"><div><span className="eyebrow">PORTABLE WORKBOOKS</span><h2>Excel 报告</h2><p>始终保留最近一次可用结果；新任务正在运行或失败时不会把上一份报告隐藏掉。</p></div></section>
+    {message && <div className="info-box">{message}</div>}
+    <div className="report-grid">
+      {ready.map(({ item, run }) => <article className="report-card panel" key={item.id}>
+        <div className="file-icon"><FileSpreadsheet /></div>
+        <div><span>MY MARKETPLACE · XLSX</span><h3>{item.keyword}</h3><p>{run.analysis?.counts?.shopee || 0} Shopee + {run.analysis?.counts?.lazada || 0} Lazada</p></div>
+        <div className="report-score"><strong>{run.opportunity_score ?? "—"}</strong><span>{run.verdict}</span></div>
+        <button onClick={() => download(item, run)}><Download />下载</button>
+      </article>)}
+      {ready.length === 0 && <div className="empty-state panel">还没有可下载的报告。</div>}
+    </div>
+  </div>;
 }

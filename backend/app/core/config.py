@@ -1,30 +1,58 @@
 from pathlib import Path
 from urllib.parse import quote_plus
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
+
+
+def _valid_daily_time(value: str) -> str:
+    try:
+        hour_text, minute_text = value.split(":")
+        hour, minute = int(hour_text), int(minute_text)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("DEFAULT_DAILY_TIME 必须为 HH:MM") from exc
+    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+        raise ValueError("DEFAULT_DAILY_TIME 必须为 HH:MM")
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _valid_timezone(value: str) -> str:
+    value = value.strip()
+    try:
+        ZoneInfo(value)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ValueError("DEFAULT_TIMEZONE 不是有效 IANA 时区") from exc
+    return value
 
 
 class Settings(BaseSettings):
     APP_NAME: str = "MY Marketplace Analyzer"
-    APP_VERSION: str = "1.0.1"
+    APP_VERSION: str = "1.0.2"
     DEBUG: bool = False
     SECRET_KEY: str = "dev-secret-key-change-in-production"
+    ALLOW_REGISTRATION: bool = False
+
+    BOOTSTRAP_ADMIN_USERNAME: str = "admin"
+    BOOTSTRAP_ADMIN_EMAIL: str = "admin@market.my"
+    BOOTSTRAP_ADMIN_PASSWORD: str = ""
 
     DATA_DIR: str = ""
     DATABASE_TYPE: str = "sqlite"
+    ALLOW_DATABASE_FALLBACK: bool = False
     MYSQL_HOST: str = ""
-    MYSQL_PORT: int = 3306
+    MYSQL_PORT: int = Field(default=3306, ge=1, le=65535)
     MYSQL_USER: str = ""
     MYSQL_PASSWORD: str = ""
     MYSQL_DATABASE: str = "marketplace_ai"
 
     BROWSER_PROFILE_DIR: str = ""
     BROWSER_EXECUTABLE: str = ""
-    BROWSER_CDP_PORT: int = 9231
-    BROWSER_START_TIMEOUT_SECONDS: float = 8.0
+    BROWSER_CDP_PORT: int = Field(default=9231, ge=1024, le=65535)
+    BROWSER_START_TIMEOUT_SECONDS: float = Field(default=8.0, ge=1.0, le=60.0)
     BROWSER_HEADLESS_FALLBACK: bool = True
-    COLLECTION_TIMEOUT_SECONDS: int = 45
-    DEFAULT_RESULTS_LIMIT: int = 20
+    COLLECTION_TIMEOUT_SECONDS: int = Field(default=45, ge=5, le=120)
+    DEFAULT_RESULTS_LIMIT: int = Field(default=20, ge=10, le=40)
     DEFAULT_DAILY_TIME: str = "20:00"
     DEFAULT_TIMEZONE: str = "Asia/Kuala_Lumpur"
 
@@ -32,6 +60,24 @@ class Settings(BaseSettings):
     LLM_MODEL: str = "deepseek-chat"
     LLM_API_KEY: str = ""
     LLM_BASE_URL: str = "https://api.deepseek.com"
+
+    @field_validator("DATABASE_TYPE", mode="before")
+    @classmethod
+    def validate_database_type(cls, value: str) -> str:
+        normalized = str(value).strip().lower()
+        if normalized not in {"sqlite", "mysql"}:
+            raise ValueError("DATABASE_TYPE 仅支持 sqlite 或 mysql")
+        return normalized
+
+    @field_validator("DEFAULT_DAILY_TIME")
+    @classmethod
+    def validate_default_daily_time(cls, value: str) -> str:
+        return _valid_daily_time(value)
+
+    @field_validator("DEFAULT_TIMEZONE")
+    @classmethod
+    def validate_default_timezone(cls, value: str) -> str:
+        return _valid_timezone(value)
 
     @property
     def data_path(self) -> Path:
@@ -47,7 +93,7 @@ class Settings(BaseSettings):
 
     @property
     def DATABASE_URL(self) -> str:
-        if self.DATABASE_TYPE.lower() == "mysql":
+        if self.DATABASE_TYPE == "mysql":
             user = quote_plus(self.MYSQL_USER)
             password = quote_plus(self.MYSQL_PASSWORD)
             return (

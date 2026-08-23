@@ -62,7 +62,10 @@ class SnapshotAndReportTests(unittest.TestCase):
             "shopee": {"score": 62, "verdict": "谨慎观察", "sample_size": 12, "confidence": 81},
             "lazada": {"score": 60, "verdict": "谨慎观察", "sample_size": 11, "confidence": 79},
         }
-        run.analysis = {"recommendations": ["先小批量测试。"]}
+        run.analysis = {
+            "request_config": {"keyword": "water bottle", "platforms": ["shopee", "lazada"], "results_limit": 20},
+            "recommendations": ["先小批量测试。"],
+        }
         db.add(ListingSnapshot(
             run_id=run.id, keyword_id=self.keyword_id, platform="lazada", item_id="l1",
             title="Bottle", product_url="https://example.test/l1", price=20, search_rank=1, data_quality=0.5,
@@ -76,7 +79,40 @@ class SnapshotAndReportTests(unittest.TestCase):
         )
         lazada = workbook["Lazada竞品"]
         self.assertEqual(lazada.cell(2, 4).value, "—")
-        self.assertIn("Lazada 结论", [row[0].value for row in workbook["综合结论"].iter_rows()])
+        summary_labels = [row[0].value for row in workbook["综合结论"].iter_rows()]
+        self.assertIn("Lazada 结论", summary_labels)
+        self.assertIn("本次扫描配置", summary_labels)
+        db.close()
+
+    def test_trend_excludes_running_verification_and_failed_checkpoints(self):
+        db = self.Session()
+        stable = db.query(AnalysisRun).filter_by(id=self.run1_id).one()
+        stable.analysis = {"recommendations": []}
+        db.add(ListingSnapshot(
+            run_id=stable.id, keyword_id=self.keyword_id, platform="shopee", item_id="stable",
+            title="Stable Bottle", product_url="https://example.test/stable", price=20, search_rank=1,
+        ))
+        unfinished_runs = [
+            AnalysisRun(keyword_id=self.keyword_id, status="running"),
+            AnalysisRun(keyword_id=self.keyword_id, status="needs_verification"),
+            AnalysisRun(keyword_id=self.keyword_id, status="failed"),
+        ]
+        db.add_all(unfinished_runs)
+        db.flush()
+        for index, unfinished in enumerate(unfinished_runs):
+            db.add(ListingSnapshot(
+                run_id=unfinished.id, keyword_id=self.keyword_id, platform="shopee", item_id=f"temp-{index}",
+                title=f"Temp {index}", product_url=f"https://example.test/temp-{index}", price=10 + index, search_rank=1,
+            ))
+        db.commit()
+
+        workbook = load_workbook(BytesIO(build_report(db, stable).getvalue()))
+        trend = workbook["每日价格与排名趋势"]
+        item_ids = [row[2].value for row in trend.iter_rows(min_row=2)]
+        self.assertIn("stable", item_ids)
+        self.assertNotIn("temp-0", item_ids)
+        self.assertNotIn("temp-1", item_ids)
+        self.assertNotIn("temp-2", item_ids)
         db.close()
 
 

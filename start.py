@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 import socket
 import subprocess
 import sys
@@ -60,13 +61,28 @@ def main() -> int:
 
     env = os.environ.copy()
     env["PYTHONPATH"] = str(BACKEND)
+
+    # Keep all insecure conveniences strictly inside the localhost launcher when no .env is
+    # present. Formal Docker/systemd/direct uvicorn deployments must provide persistent secrets.
+    local_mode = not (ROOT / ".env").exists()
+    local_bootstrap = False
+    if local_mode and not env.get("SECRET_KEY"):
+        env["SECRET_KEY"] = secrets.token_hex(32)
+    if local_mode and not env.get("BOOTSTRAP_ADMIN_PASSWORD"):
+        env["BOOTSTRAP_ADMIN_PASSWORD"] = "admin123"
+        local_bootstrap = True
+
     command = [
         python_executable(), "-m", "uvicorn", "app.main:app",
         "--host", HOST, "--port", str(PORT),
     ]
     print("MY Market Radar 正在启动…")
     print(f"地址：http://localhost:{PORT}（仅本机）")
-    print("账号：admin@market.my / admin123")
+    if local_bootstrap:
+        print("首次本地账号：admin@market.my / admin123")
+        print("提示：该默认密码只用于没有 .env 的本机启动器，请勿用于公网部署。")
+    else:
+        print("登录账号使用现有数据库；首次部署请在 .env 设置 BOOTSTRAP_ADMIN_PASSWORD。")
     threading.Thread(target=open_when_ready, daemon=True).start()
     process = subprocess.Popen(command, cwd=BACKEND, env=env)
     try:

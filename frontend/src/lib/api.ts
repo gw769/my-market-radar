@@ -93,15 +93,6 @@ export async function apiDelete<T = any>(url: string): Promise<T> {
   return parseResponse<T>(await fetch(`${BASE}${url}`, { method: "DELETE", headers: headers() }));
 }
 
-export function downloadBlob(url: string, filename: string) {
-  const a = document.createElement("a");
-  a.href = `${BASE}${url}`;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-}
-
 export async function downloadAuthorized(url: string, filename: string) {
   const token = localStorage.getItem("token");
   const res = await fetch(`${BASE}${url}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
