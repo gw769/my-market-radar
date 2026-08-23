@@ -11,10 +11,25 @@ from app.models.marketplace import AnalysisRun, ListingSnapshot
 HEADER_FILL = PatternFill("solid", fgColor="0F766E")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
 RESULT_STATUSES = ("completed", "partial")
+FORMULA_PREFIXES = ("=", "+", "-", "@")
+
+
+def _excel_safe(value):
+    """Keep untrusted marketplace/user strings as literal Excel text, never formulas."""
+    if not isinstance(value, str):
+        return value
+    candidate = value.lstrip()
+    if candidate.startswith(FORMULA_PREFIXES):
+        return "'" + value
+    return value
+
+
+def _append(ws, values) -> None:
+    ws.append([_excel_safe(value) for value in values])
 
 
 def _header(ws, labels: list[str]) -> None:
-    ws.append(labels)
+    _append(ws, labels)
     for cell in ws[1]:
         cell.fill = HEADER_FILL
         cell.font = HEADER_FONT
@@ -28,26 +43,26 @@ def build_report(db: Session, run: AnalysisRun) -> BytesIO:
     wb = Workbook()
     summary = wb.active
     summary.title = "综合结论"
-    summary.append(["MY Marketplace 公开竞品分析", keyword.keyword])
-    summary.append(["机会分", run.opportunity_score if run.opportunity_score is not None else "—"])
-    summary.append(["结论", run.verdict or "数据不足"])
-    summary.append(["数据完整度", f"{run.confidence or 0:.1f}%"])
+    _append(summary, ["MY Marketplace 公开竞品分析", keyword.keyword])
+    _append(summary, ["机会分", run.opportunity_score if run.opportunity_score is not None else "—"])
+    _append(summary, ["结论", run.verdict or "数据不足"])
+    _append(summary, ["数据完整度", f"{run.confidence or 0:.1f}%"])
     analysis = run.analysis or {}
     evidence = analysis.get("evidence") or {}
     collector = analysis.get("collector_health") or {}
     if evidence:
-        summary.append(["证据等级", f"{evidence.get('grade', '—')} · {evidence.get('label', '—')}"])
-        summary.append([
+        _append(summary, ["证据等级", f"{evidence.get('grade', '—')} · {evidence.get('label', '—')}"])
+        _append(summary, [
             "证据摘要",
             f"采集健康度 {evidence.get('collector_health', 0)}%；相关样本 {evidence.get('sample_total', 0)} 条；"
             + ("；".join(evidence.get("reasons") or []) or "未发现主要证据警告"),
         ])
     if collector:
-        summary.append(["采集器状态", f"{collector.get('status', 'unknown')} · {collector.get('health_score', 0)}%"])
-    summary.append(["数据口径", "公开搜索结果快照；不是利润、真实月销量或转化率预测。"])
+        _append(summary, ["采集器状态", f"{collector.get('status', 'unknown')} · {collector.get('health_score', 0)}%"])
+    _append(summary, ["数据口径", "公开搜索结果快照；不是利润、真实月销量或转化率预测。"])
     request_config = analysis.get("request_config") or {}
     if request_config:
-        summary.append([
+        _append(summary, [
             "本次扫描配置",
             f"平台 {', '.join(request_config.get('platforms') or [])}；每平台上限 {request_config.get('results_limit', '—')} 条",
         ])
@@ -55,19 +70,19 @@ def build_report(db: Session, run: AnalysisRun) -> BytesIO:
         platform_score = score.get("score") if score.get("eligible", True) else "—"
         raw_sample = score.get("raw_sample_size", score.get("sample_size", 0))
         reasons = "；".join(score.get("eligibility_reasons") or [])
-        summary.append([
+        _append(summary, [
             f"{platform.title()} 结论",
             f"{score.get('verdict', '数据不足')}；机会分 {platform_score}；相关样本 {score.get('sample_size', 0)}/{raw_sample}；完整度 {score.get('confidence', 0)}%" + (f"；{reasons}" if reasons else ""),
         ])
     for platform, health in (collector.get("platforms") or {}).items():
         warnings = "；".join(health.get("warnings") or []) or "无"
-        summary.append([
+        _append(summary, [
             f"{platform.title()} 采集健康",
             f"{health.get('status', 'unknown')}；健康度 {health.get('health_score', 0)}%；"
             f"raw {health.get('raw_count', 0)} → parsed {health.get('parsed_count', 0)}；{warnings}",
         ])
     for recommendation in analysis.get("recommendations", []):
-        summary.append(["建议", recommendation])
+        _append(summary, ["建议", recommendation])
     summary.column_dimensions["A"].width = 22
     summary.column_dimensions["B"].width = 100
 
@@ -76,7 +91,7 @@ def build_report(db: Session, run: AnalysisRun) -> BytesIO:
         ws = wb.create_sheet(f"{platform.title()}竞品")
         _header(ws, columns)
         for item in [row for row in rows if row.platform == platform]:
-            ws.append([
+            _append(ws, [
                 item.search_rank, item.title, item.price if item.price is not None else "—",
                 item.original_price if item.original_price is not None else "—",
                 item.discount_percent if item.discount_percent is not None else "—",
@@ -103,18 +118,19 @@ def build_report(db: Session, run: AnalysisRun) -> BytesIO:
         .all()
     )
     for item in history:
-        trend.append([item.collected_at.isoformat() if item.collected_at else "—", item.platform, item.item_id, item.title, item.price if item.price is not None else "—", item.sold_count if item.sold_count is not None else "—", item.review_count if item.review_count is not None else "—", item.search_rank])
+        _append(trend, [item.collected_at.isoformat() if item.collected_at else "—", item.platform, item.item_id, item.title, item.price if item.price is not None else "—", item.sold_count if item.sold_count is not None else "—", item.review_count if item.review_count is not None else "—", item.search_rank])
 
     notes = wb.create_sheet("数据口径说明")
-    notes.append(["字段", "说明"])
-    notes.append(["公开已售", "平台页面当时展示的累计/公开口径，不换算为日销量或月销量。"])
-    notes.append(["机会分", "需求信号40%、进入门槛35%、价格空间25%的证据门槛启发式评分。"])
-    notes.append(["证据等级", "A/B/C/D 综合平台评分可用性、数据完整度、采集健康度和相关样本量；D 不输出强结论。"])
-    notes.append(["采集健康度", "独立判断 raw 搜索卡片到可解析商品的转换、样本覆盖和关键字段覆盖，用来区分市场弱与采集器异常。"])
-    notes.append(["缺失值", "公开页面未提供的字段不会填0，也不会把剩余权重放大；证据不足时不输出强结论。"])
-    notes.append(["相关性", "低关键词相关性的搜索漂移结果会保留在原始快照，但从机会评分样本中排除。"])
-    notes.append(["趋势", "仅纳入 completed/partial 任务；运行中、验证码暂停与失败任务的恢复 checkpoint 不进入趋势。"])
-    notes.append(["跨平台", "所选平台分别评分；原始已售数字不直接跨平台比较。"])
+    _append(notes, ["字段", "说明"])
+    _append(notes, ["公开已售", "平台页面当时展示的累计/公开口径，不换算为日销量或月销量。"])
+    _append(notes, ["机会分", "需求信号40%、进入门槛35%、价格空间25%的证据门槛启发式评分。"])
+    _append(notes, ["证据等级", "A/B/C/D 综合平台评分可用性、数据完整度、采集健康度和相关样本量；D 不输出强结论。"])
+    _append(notes, ["采集健康度", "独立判断 raw 搜索卡片到可解析商品的转换、样本覆盖和关键字段覆盖，用来区分市场弱与采集器异常。"])
+    _append(notes, ["缺失值", "公开页面未提供的字段不会填0，也不会把剩余权重放大；证据不足时不输出强结论。"])
+    _append(notes, ["相关性", "低关键词相关性的搜索漂移结果会保留在原始快照，但从机会评分样本中排除。"])
+    _append(notes, ["趋势", "仅纳入 completed/partial 任务；运行中、验证码暂停与失败任务的恢复 checkpoint 不进入趋势。"])
+    _append(notes, ["跨平台", "所选平台分别评分；原始已售数字不直接跨平台比较。"])
+    _append(notes, ["单元格安全", "用户输入与平台公开文本统一按文本写入；以 =、+、-、@ 开头的字符串不会作为 Excel 公式执行。"])
 
     output = BytesIO()
     wb.save(output)
