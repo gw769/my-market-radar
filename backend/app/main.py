@@ -56,9 +56,11 @@ async def lifespan(app: FastAPI):
     _ensure_default_admin()
     recover_interrupted_runs()
     start_scheduler()
-    yield
-    stop_scheduler()
-    logger.info("应用关闭")
+    try:
+        yield
+    finally:
+        stop_scheduler()
+        logger.info("应用关闭")
 
 
 def _ensure_default_admin():
