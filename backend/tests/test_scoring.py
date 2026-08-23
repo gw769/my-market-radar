@@ -116,6 +116,18 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(concentrated_result["metrics"]["seller_count"], 1)
         self.assertEqual(dispersed_result["metrics"]["seller_count"], 20)
 
+    def test_small_sample_top5_floor_does_not_fake_concentration(self):
+        items = samples(5, sold_base=100)
+        for index, item in enumerate(items):
+            item["shop_id"] = f"seller-{index}"
+            item["sold_count"] = 100
+        result = score_platform(items, keyword=None, min_sample_size=4)
+        self.assertEqual(result["metrics"]["top5_seller_listing_share"], 100.0)
+        self.assertEqual(result["metrics"]["top5_seller_demand_share"], 100.0)
+        self.assertEqual(result["metrics"]["seller_listing_hhi"], 0.0)
+        self.assertEqual(result["metrics"]["seller_demand_hhi"], 0.0)
+        self.assertEqual(result["metrics"]["seller_concentration"], 0.0)
+
     def test_missing_seller_identity_does_not_invent_concentration(self):
         result = score_platform(samples(20), keyword="water bottle")
         self.assertIsNone(result["metrics"]["seller_concentration"])
