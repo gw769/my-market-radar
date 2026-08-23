@@ -72,12 +72,15 @@ class AdapterTests(unittest.TestCase):
         # Python parsing intentionally does not infer a rating from arbitrary card text.
         self.assertIsNone(row.rating)
 
-    def test_verification_html_is_detected(self):
+    def test_verification_html_is_detected_without_verified_seller_false_positive(self):
         html = (FIXTURES / "verification_page.html").read_text()
         adapter = ShopeeMalaysiaAdapter()
         self.assertTrue(adapter.is_verification_page("https://shopee.com.my/search", html))
         self.assertTrue(adapter.is_verification_page("https://shopee.xiapibuy.com/verify", ""))
-        self.assertFalse(adapter.is_verification_page("https://shopee.com.my/search", "No products found"))
+        self.assertTrue(adapter.is_verification_page("https://shopee.com.my/verify", ""))
+        self.assertTrue(adapter.is_verification_page("https://shopee.com.my/search", "Please verify your identity to continue"))
+        self.assertFalse(adapter.is_verification_page("https://shopee.com.my/search", "Verified Seller · 4.9 rating · No products found"))
+        self.assertFalse(adapter.is_verification_page("https://shopee.com.my/search", "Verification tools and verified accessories"))
 
 
 if __name__ == "__main__":
