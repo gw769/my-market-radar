@@ -81,7 +81,7 @@ export default function Discovery() {
 
   useEffect(() => {
     apiGet<any>("/marketplace-defaults")
-      .then((response) => setDefaults(response.data || defaults))
+      .then((response) => { if (response.data) setDefaults(response.data); })
       .catch(() => {});
     load().catch(() => {});
     const timer = window.setInterval(() => {
@@ -105,15 +105,7 @@ export default function Discovery() {
         .map((score: any) => score?.metrics?.median_price)
         .filter((value: any) => typeof value === "number") as number[];
       const medianPrice = prices.length ? prices.reduce((sum, value) => sum + value, 0) / prices.length : null;
-      return {
-        seed,
-        keyword,
-        latest,
-        run,
-        evidence,
-        topSegment,
-        medianPrice,
-      };
+      return { seed, keyword, latest, run, evidence, topSegment, medianPrice };
     }).sort((a, b) => {
       const aGrade = GRADE_RANK[a.evidence?.grade] || 0;
       const bGrade = GRADE_RANK[b.evidence?.grade] || 0;
@@ -186,14 +178,14 @@ export default function Discovery() {
       <div className="notice-row"><RefreshCw size={17} /><span>当前：{readyCount}/{preset.seeds.length} 个候选已有稳定结果，{activeCount} 个任务正在排队/采集/验证。</span></div>
       {message && <div className="info-box">{message}</div>}
       {error && <div className="error-box">{error}</div>}
-      <button className="primary-button analyze-button" disabled={busy || activeCount > 0} onClick={startDiscovery}>
-        {busy ? "正在提交候选…" : activeCount > 0 ? "候选扫描进行中" : "扫描这一组候选"}<Play size={18} />
+      <button className="primary-button analyze-button" disabled={busy} onClick={startDiscovery}>
+        {busy ? "正在提交候选…" : activeCount > 0 ? "补充 / 刷新其余候选" : "扫描这一组候选"}<Play size={18} />
       </button>
     </section>
 
     <section className="panel">
       <div className="panel-title"><div><span>RANKED CANDIDATES</span><h3>{preset.name} · 候选机会榜</h3></div><Sparkles /></div>
-      <p className="method-note">这是第一轮快速筛选，不是利润预测。Evidence D 不应进入采购决策；排名靠前的候选建议再到“关键词分析”做完整样本扫描。</p>
+      <p className="method-note">这是第一轮快速筛选，不是利润预测。Evidence D 不应进入采购决策；排名靠前的候选建议再到“关键词分析”做完整样本扫描。新建候选默认不启用每日跟踪，避免自动发现污染长期任务。</p>
       <div className="table-shell">
         <table>
           <thead><tr><th>#</th><th>候选</th><th>状态</th><th>Evidence</th><th>机会分</th><th>完整度</th><th>中位价</th><th>最高商品族</th><th>商品族可靠度</th></tr></thead>
