@@ -156,15 +156,14 @@ def _save_state(run_id: int, worker_id: str | None = None, **values: Any) -> boo
     db = SessionLocal()
     try:
         query = db.query(AnalysisRun).filter(AnalysisRun.id == run_id)
+        payload = dict(values)
         if worker_id is not None:
             query = query.filter(AnalysisRun.worker_id == worker_id, AnalysisRun.status == "running")
-        run = query.first()
-        if not run:
+            payload["heartbeat_at"] = _utcnow()
+        updated = query.update(payload, synchronize_session=False)
+        if updated != 1:
+            db.rollback()
             return False
-        for key, value in values.items():
-            setattr(run, key, value)
-        if worker_id is not None:
-            run.heartbeat_at = _utcnow()
         db.commit()
         return True
     finally:
@@ -210,24 +209,26 @@ def _persist_platform(
 ) -> None:
     db = SessionLocal()
     try:
-        owner = (
+        claimed = (
             db.query(AnalysisRun)
             .filter(
                 AnalysisRun.id == run_id,
                 AnalysisRun.worker_id == worker_id,
                 AnalysisRun.status == "running",
             )
-            .first()
+            .update({AnalysisRun.heartbeat_at: _utcnow()}, synchronize_session=False)
         )
-        if not owner:
+        if claimed != 1:
+            db.rollback()
             raise WorkerLeaseLost(f"run {run_id} 的 worker 租约已失效")
+        # The conditional UPDATE above acquires the DB write/row lock before snapshots change.
+        # A watchdog cannot swap worker_id until this checkpoint transaction finishes.
         db.query(ListingSnapshot).filter(
             ListingSnapshot.run_id == run_id,
             ListingSnapshot.platform == platform,
         ).delete(synchronize_session=False)
         for listing in listings:
             db.add(_snapshot(run_id, keyword_id, platform, listing))
-        owner.heartbeat_at = _utcnow()
         db.commit()
     finally:
         db.close()
@@ -395,20 +396,29 @@ def _persist_results(db: Session, run: AnalysisRun, keyword: TrackedKeyword, col
 def _mark_verification(run_id: int, exc: VerificationRequired, worker_id: str) -> None:
     db = SessionLocal()
     try:
-        run = (
+        updated = (
             db.query(AnalysisRun)
-            .filter(AnalysisRun.id == run_id, AnalysisRun.worker_id == worker_id)
-            .first()
+            .filter(
+                AnalysisRun.id == run_id,
+                AnalysisRun.worker_id == worker_id,
+                AnalysisRun.status == "running",
+            )
+            .update(
+                {
+                    AnalysisRun.status: "needs_verification",
+                    AnalysisRun.current_step: f"{exc.platform.title()} 需要人工验证",
+                    AnalysisRun.verification_platform: exc.platform,
+                    AnalysisRun.error_message: f"{exc.platform.title()} 触发了人工验证。打开项目 Chrome 完成验证，保持该标签页和窗口打开，然后点击继续。",
+                    AnalysisRun.worker_id: None,
+                    AnalysisRun.heartbeat_at: None,
+                },
+                synchronize_session=False,
+            )
         )
-        if not run:
-            return
-        run.status = "needs_verification"
-        run.current_step = f"{exc.platform.title()} 需要人工验证"
-        run.verification_platform = exc.platform
-        run.error_message = f"{exc.platform.title()} 触发了人工验证。打开项目 Chrome 完成验证，保持该标签页和窗口打开，然后点击继续。"
-        run.worker_id = None
-        run.heartbeat_at = None
-        db.commit()
+        if updated:
+            db.commit()
+        else:
+            db.rollback()
     finally:
         db.close()
 
@@ -420,16 +430,21 @@ def _mark_failed(run_id: int, exc: Exception, worker_id: str | None = None) -> N
         query = db.query(AnalysisRun).filter(AnalysisRun.id == run_id)
         if worker_id is not None:
             query = query.filter(AnalysisRun.worker_id == worker_id)
-        run = query.first()
-        if not run:
-            return
-        run.status = "failed"
-        run.current_step = "采集失败"
-        run.error_message = str(exc)[:1000]
-        run.completed_at = _utcnow()
-        run.worker_id = None
-        run.heartbeat_at = None
-        db.commit()
+        updated = query.update(
+            {
+                AnalysisRun.status: "failed",
+                AnalysisRun.current_step: "采集失败",
+                AnalysisRun.error_message: str(exc)[:1000],
+                AnalysisRun.completed_at: _utcnow(),
+                AnalysisRun.worker_id: None,
+                AnalysisRun.heartbeat_at: None,
+            },
+            synchronize_session=False,
+        )
+        if updated:
+            db.commit()
+        else:
+            db.rollback()
     finally:
         db.close()
 
@@ -492,27 +507,37 @@ def execute_run_sync(run_id: int) -> None:
 
     db = SessionLocal()
     try:
-        run = (
+        # Conditional UPDATE is the finalization lease claim. It both verifies ownership and
+        # acquires the DB write/row lock, closing the select-then-write race with the watchdog.
+        claimed = (
             db.query(AnalysisRun)
             .filter(
                 AnalysisRun.id == run_id,
                 AnalysisRun.worker_id == worker_id,
                 AnalysisRun.status == "running",
             )
-            .first()
+            .update(
+                {
+                    AnalysisRun.heartbeat_at: _utcnow(),
+                    AnalysisRun.current_step: "计算公开数据机会分",
+                    AnalysisRun.progress: 75,
+                },
+                synchronize_session=False,
+            )
         )
-        if not run:
+        if claimed != 1:
+            db.rollback()
             logger.warning("最终写入前 worker 租约已失效 run=%s worker=%s", run_id, worker_id)
             return
+
+        run = db.query(AnalysisRun).filter(AnalysisRun.id == run_id).one()
         keyword = db.query(TrackedKeyword).filter(TrackedKeyword.id == run.keyword_id).first()
         if not keyword:
+            db.rollback()
             return
         _persist_results(db, run, keyword, collected)
         db.flush()
 
-        run.progress = 75
-        run.current_step = "计算公开数据机会分"
-        run.heartbeat_at = _utcnow()
         by_platform = {platform: [listing.to_dict() for listing in listings] for platform, listings in collected.items()}
         analysis = build_analysis(collection_request.keyword, by_platform)
         collector_health = summarize_collector_health(platform_health, collection_request.platforms)
