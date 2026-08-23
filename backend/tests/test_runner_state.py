@@ -1,6 +1,7 @@
 import unittest
 from unittest.mock import Mock, patch
 
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -84,8 +85,6 @@ class RunnerStateTests(unittest.TestCase):
         with patch.object(runner, "SessionLocal", self.Session), patch.object(runner, "_executor", fake_executor):
             self.assertTrue(runner.submit_run(run_id))
             self.assertEqual(len(fake_executor.calls), 1)
-            # Simulates /resume changing the same run back to pending before the old worker's
-            # finally block has removed its queue marker.
             self.assertTrue(runner.submit_run(run_id))
             self.assertIn(run_id, runner._requeue_requested)
             self.assertEqual(len(fake_executor.calls), 1)
@@ -149,6 +148,43 @@ class RunnerStateTests(unittest.TestCase):
         retry = db.query(AnalysisRun).filter_by(id=response["run"]["id"]).one()
         self.assertEqual(retry.status, "pending")
         self.assertEqual(retry.trigger, "retry")
+        db.close()
+
+    def test_keyword_payload_keeps_last_result_while_new_run_is_pending(self):
+        db = self.Session()
+        keyword = db.query(TrackedKeyword).filter_by(id=self.keyword_id).one()
+        stable = AnalysisRun(
+            keyword_id=keyword.id,
+            status="completed",
+            progress=100,
+            opportunity_score=68.0,
+            verdict="谨慎观察",
+        )
+        db.add(stable)
+        db.commit()
+        pending = AnalysisRun(keyword_id=keyword.id, status="pending", progress=0)
+        db.add(pending)
+        db.commit()
+        user = db.query(User).filter_by(id=self.user_id).one()
+
+        payload = marketplace_api.list_keywords(db=db, current_user=user)["data"][0]
+        self.assertEqual(payload["latest_run"]["id"], pending.id)
+        self.assertEqual(payload["latest_run"]["status"], "pending")
+        self.assertEqual(payload["latest_result_run"]["id"], stable.id)
+        self.assertEqual(payload["latest_result_run"]["opportunity_score"], 68.0)
+        db.close()
+
+    def test_pending_keyword_cannot_be_deleted_under_worker(self):
+        db = self.Session()
+        keyword = db.query(TrackedKeyword).filter_by(id=self.keyword_id).one()
+        db.add(AnalysisRun(keyword_id=keyword.id, status="pending", progress=0))
+        db.commit()
+        user = db.query(User).filter_by(id=self.user_id).one()
+
+        with self.assertRaises(HTTPException) as raised:
+            marketplace_api.delete_keyword(keyword.id, db=db, current_user=user)
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertIsNotNone(db.query(TrackedKeyword).filter_by(id=keyword.id).first())
         db.close()
 
 
