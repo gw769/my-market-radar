@@ -75,6 +75,16 @@ class BrowserTabSelectionTests(unittest.TestCase):
             self.assertTrue(browser.activate_platform_tab("shopee"))
         activate.assert_called_once_with("verify")
 
+    def test_same_priority_verification_tabs_do_not_depend_on_json_list_order(self):
+        first = tab("challenge-a", "https://shopee.xiapibuy.com/verify?a=1")
+        second = tab("challenge-z", "https://shopee.xiapibuy.com/verify?b=2")
+        with patch.object(browser, "list_tabs", return_value=[first, second]):
+            selected_a = browser.find_platform_tab("shopee")
+        with patch.object(browser, "list_tabs", return_value=[second, first]):
+            selected_b = browser.find_platform_tab("shopee")
+        self.assertEqual(selected_a["id"], "challenge-z")
+        self.assertEqual(selected_b["id"], "challenge-z")
+
 
 if __name__ == "__main__":
     unittest.main()
