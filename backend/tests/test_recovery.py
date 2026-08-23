@@ -47,7 +47,7 @@ class FakeSession:
 
 
 class RecoveryTests(unittest.TestCase):
-    def test_running_run_is_reset_and_all_recoverable_runs_are_requeued(self):
+    def test_all_recoverable_runs_are_reset_and_requeued(self):
         running = FakeRun(10, "running")
         pending = FakeRun(11, "pending")
         session = FakeSession([running, pending])
@@ -61,14 +61,14 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(queued, 2)
         self.assertTrue(session.committed)
         self.assertTrue(session.closed)
-        self.assertEqual(running.status, "pending")
-        self.assertEqual(running.progress, 0)
-        self.assertEqual(running.current_step, "服务重启后等待恢复采集")
-        self.assertIsNone(running.started_at)
-        self.assertIsNone(running.completed_at)
-        self.assertIsNone(running.error_message)
-        self.assertIsNone(running.verification_platform)
-        self.assertEqual(pending.status, "pending")
+        for run in (running, pending):
+            self.assertEqual(run.status, "pending")
+            self.assertEqual(run.progress, 0)
+            self.assertEqual(run.current_step, "服务重启后等待恢复采集")
+            self.assertIsNone(run.started_at)
+            self.assertIsNone(run.completed_at)
+            self.assertIsNone(run.error_message)
+            self.assertIsNone(run.verification_platform)
         self.assertEqual([call.args[0] for call in submit.call_args_list], [10, 11])
 
     def test_empty_recovery_does_not_commit_or_submit(self):
