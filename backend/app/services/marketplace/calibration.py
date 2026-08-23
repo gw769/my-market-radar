@@ -74,9 +74,6 @@ def calibrate_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
         sample_factor = min(1.0, sample_size / 12.0)
         confidence_factor = min(1.0, float(item.get("confidence") or 0) / 80.0)
 
-        # Reliability is intentionally conservative. Four rows on one of two selected platforms
-        # should remain a useful clue, but should not outrank a well-supported family solely due
-        # to extreme values.
         reliability = 0.50 * sample_factor + 0.30 * platform_factor + 0.20 * confidence_factor
         calibrated = _shrink_to_neutral(weighted, reliability)
         item["raw_opportunity_score"] = round(weighted, 1)
@@ -95,12 +92,23 @@ def calibrate_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
     )
     analysis["opportunity_segments"] = calibrated_segments[:5]
 
-    # build_analysis generated its top-segment sentence before calibration. Replace that one
-    # sentence so the prose follows the actual final ranking instead of stale pre-calibration data.
+    keyword = str(analysis.get("keyword") or "")
+    overall_prefix = f"“{keyword}”当前公开数据机会分为 " if keyword else ""
     recommendations = [
-        text for text in (analysis.get("recommendations") or [])
+        text
+        for text in (analysis.get("recommendations") or [])
         if not text.startswith("自动拆分的商品族中，当前排序最高的是")
+        and not text.startswith("自动拆分的商品族中，校准后排序最高的是")
+        and (not overall_prefix or not text.startswith(overall_prefix))
     ]
+
+    if all_eligible and analysis.get("opportunity_score") is not None and keyword:
+        recommendations.insert(
+            0,
+            f"“{keyword}”按平台数据完整度校准后的机会分为 {analysis['opportunity_score']}，"
+            f"结论：{analysis['verdict']}。",
+        )
+
     if calibrated_segments:
         top = calibrated_segments[0]
         recommendations.append(
@@ -109,4 +117,11 @@ def calibrate_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
             f"样本 {top['sample_size']} 条）；优先验证这一子类。"
         )
     analysis["recommendations"] = recommendations
+
+    methodology = str(analysis.get("methodology") or "")
+    calibration_note = (
+        "跨平台总分按各平台数据完整度加权；商品族按样本量、平台覆盖和完整度向中性分收缩。"
+    )
+    if calibration_note not in methodology:
+        analysis["methodology"] = methodology + calibration_note
     return analysis
