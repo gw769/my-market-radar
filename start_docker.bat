@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 
 echo ================================================================
@@ -12,12 +12,40 @@ if not exist ".env" (
     echo.
     echo   Step 1: open a cmd window here and run:
     echo          copy .env.docker.simple .env
-    echo   Step 2: edit .env and set a secure SECRET_KEY
+    echo   Step 2: edit .env and set SECRET_KEY and BOOTSTRAP_ADMIN_PASSWORD
     echo.
     pause
     exit /b 1
 )
 echo [OK] .env found.
+
+set "bootstrap_password="
+set "bootstrap_email=admin@market.my"
+set "secret_key="
+for /f "usebackq tokens=1,* delims==" %%A in (".env") do (
+    if /I "%%A"=="BOOTSTRAP_ADMIN_PASSWORD" set "bootstrap_password=%%B"
+    if /I "%%A"=="BOOTSTRAP_ADMIN_EMAIL" set "bootstrap_email=%%B"
+    if /I "%%A"=="SECRET_KEY" set "secret_key=%%B"
+)
+if not defined bootstrap_password (
+    echo [ERROR] BOOTSTRAP_ADMIN_PASSWORD is empty in .env.
+    echo   Set a private password for the first administrator account.
+    pause
+    exit /b 1
+)
+if not defined secret_key (
+    echo [ERROR] SECRET_KEY is empty in .env.
+    pause
+    exit /b 1
+)
+if /I "!secret_key!"=="please-change-me-to-a-random-32-char-string" (
+    echo [ERROR] SECRET_KEY still uses the template value.
+    echo   Replace it with a random private string before starting Docker.
+    pause
+    exit /b 1
+)
+
+echo [OK] Bootstrap credentials and secret are configured.
 
 where docker >nul 2>&1
 if errorlevel 1 (
@@ -38,7 +66,7 @@ if errorlevel 1 (
 )
 echo [OK] Docker engine is running.
 
-echo [INFO] Building and starting container (first build takes 5-10 min)...
+echo [INFO] Building and starting container...
 echo.
 docker compose -f docker-compose.simple.yml up -d --build
 if errorlevel 1 (
@@ -55,11 +83,11 @@ timeout /t 5 /nobreak >nul
 set /a tries+=1
 powershell -Command "try { $r = Invoke-WebRequest -Uri 'http://localhost:8011/health' -UseBasicParsing -TimeoutSec 3; if ($r.StatusCode -eq 200) { exit 0 } else { exit 1 } } catch { exit 1 }" >nul 2>&1
 if errorlevel 1 (
-    if %tries% geq 60 (
-        echo [WARN] Backend not ready after 5 min. Please open http://localhost:8011 manually.
+    if !tries! geq 60 (
+        echo [WARN] Backend not ready after 5 min. Please inspect: docker logs my-market-radar
         goto opendone
     )
-    echo [INFO] Backend starting, retrying (%tries%)...
+    echo [INFO] Backend starting, retrying (!tries!)...
     goto waitloop
 )
 echo [OK] Backend is ready.
@@ -77,7 +105,7 @@ echo.
 echo ================================================================
 echo   SERVICE IS RUNNING
  echo   Open:  http://localhost:8011
- echo   Login: admin@market.my / admin123
+ echo   Login: !bootstrap_email! / ^(password from .env^)
  echo   Stop:  double-click stop_docker.bat
  echo   Network: localhost only by default
  echo ================================================================
