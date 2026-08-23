@@ -11,7 +11,8 @@ services:
     image: my-market-radar:latest
     container_name: my-market-radar
     ports:
-      - "8011:8000"
+      # 默认仅暴露给本机，避免公开仓库中的默认本地账号意外暴露到局域网/公网。
+      - "127.0.0.1:8011:8000"
     # .env 为必填（复制 .env.docker.simple 并改名为 .env 后填写）
     env_file:
       - .env
