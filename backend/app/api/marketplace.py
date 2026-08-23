@@ -20,6 +20,7 @@ from app.services.marketplace.scheduler import next_run_utc
 
 router = APIRouter(prefix="/api", tags=["Malaysia marketplace intelligence"])
 settings = get_settings()
+RESULT_STATUSES = ("completed", "partial")
 
 
 def _iso(value):
@@ -28,7 +29,11 @@ def _iso(value):
     return value.replace(tzinfo=timezone.utc).isoformat() if value.tzinfo is None else value.isoformat()
 
 
-def _keyword_payload(keyword: TrackedKeyword, latest: AnalysisRun | None = None) -> dict:
+def _keyword_payload(
+    keyword: TrackedKeyword,
+    latest: AnalysisRun | None = None,
+    latest_result: AnalysisRun | None = None,
+) -> dict:
     return {
         "id": keyword.id,
         "keyword": keyword.keyword,
@@ -41,6 +46,7 @@ def _keyword_payload(keyword: TrackedKeyword, latest: AnalysisRun | None = None)
         "last_success_at": _iso(keyword.last_success_at),
         "next_run_at": _iso(keyword.next_run_at),
         "latest_run": _run_payload(latest) if latest else None,
+        "latest_result_run": _run_payload(latest_result) if latest_result else None,
     }
 
 
@@ -64,6 +70,15 @@ def _run_payload(run: AnalysisRun) -> dict:
         "started_at": _iso(run.started_at),
         "completed_at": _iso(run.completed_at),
     }
+
+
+def _latest_result(db: Session, keyword_id: int) -> AnalysisRun | None:
+    return (
+        db.query(AnalysisRun)
+        .filter(AnalysisRun.keyword_id == keyword_id, AnalysisRun.status.in_(RESULT_STATUSES))
+        .order_by(AnalysisRun.id.desc())
+        .first()
+    )
 
 
 def _owned_keyword(db: Session, user_id: int, keyword_id: int) -> TrackedKeyword:
@@ -91,8 +106,6 @@ def _apply_keyword_settings(keyword: TrackedKeyword, payload: KeywordCreate) -> 
 
 @router.get("/marketplace-defaults")
 def marketplace_defaults(current_user: User = Depends(get_current_user)):
-    # Keep runtime defaults in one place. The frontend previously hardcoded 20 / 20:00 /
-    # Asia/Kuala_Lumpur, so changing .env silently had no effect on newly created keywords.
     return {
         "success": True,
         "data": {
@@ -111,9 +124,10 @@ def add_keyword(payload: KeywordCreate, db: Session = Depends(get_db), current_u
         _apply_keyword_settings(existing, payload)
         db.commit()
         db.refresh(existing)
+        previous_result = _latest_result(db, existing.id)
         run = create_run(db, existing, trigger="manual")
         queued = submit_run(run.id)
-        return {"success": True, "queued": queued, "keyword": _keyword_payload(existing, run), "run": _run_payload(run)}
+        return {"success": True, "queued": queued, "keyword": _keyword_payload(existing, run, previous_result), "run": _run_payload(run)}
 
     keyword = TrackedKeyword(user_id=current_user.id, keyword=payload.keyword)
     _apply_keyword_settings(keyword, payload)
@@ -122,7 +136,7 @@ def add_keyword(payload: KeywordCreate, db: Session = Depends(get_db), current_u
     db.refresh(keyword)
     run = create_run(db, keyword, trigger="manual")
     queued = submit_run(run.id)
-    return {"success": True, "queued": queued, "keyword": _keyword_payload(keyword, run), "run": _run_payload(run)}
+    return {"success": True, "queued": queued, "keyword": _keyword_payload(keyword, run, None), "run": _run_payload(run)}
 
 
 @router.get("/keywords")
@@ -131,7 +145,7 @@ def list_keywords(db: Session = Depends(get_db), current_user: User = Depends(ge
     data = []
     for keyword in keywords:
         latest = db.query(AnalysisRun).filter(AnalysisRun.keyword_id == keyword.id).order_by(AnalysisRun.id.desc()).first()
-        data.append(_keyword_payload(keyword, latest))
+        data.append(_keyword_payload(keyword, latest, _latest_result(db, keyword.id)))
     return {"success": True, "data": data}
 
 
@@ -144,15 +158,18 @@ def update_keyword(keyword_id: int, payload: KeywordUpdate, db: Session = Depend
     db.commit()
     db.refresh(keyword)
     latest = db.query(AnalysisRun).filter(AnalysisRun.keyword_id == keyword.id).order_by(AnalysisRun.id.desc()).first()
-    return {"success": True, "data": _keyword_payload(keyword, latest)}
+    return {"success": True, "data": _keyword_payload(keyword, latest, _latest_result(db, keyword.id))}
 
 
 @router.delete("/keywords/{keyword_id}")
 def delete_keyword(keyword_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     keyword = _owned_keyword(db, current_user.id, keyword_id)
-    running = db.query(AnalysisRun).filter(AnalysisRun.keyword_id == keyword.id, AnalysisRun.status == "running").first()
-    if running:
-        raise HTTPException(status_code=409, detail="当前关键词正在采集，任务结束或暂停后再删除")
+    active = db.query(AnalysisRun).filter(
+        AnalysisRun.keyword_id == keyword.id,
+        AnalysisRun.status.in_(("pending", "running")),
+    ).first()
+    if active:
+        raise HTTPException(status_code=409, detail="当前关键词正在采集队列中，任务结束或暂停后再删除")
     db.delete(keyword)
     db.commit()
     return {"success": True}
@@ -227,7 +244,7 @@ def resume_run(run_id: int, db: Session = Depends(get_db), current_user: User = 
 @router.get("/runs/{run_id}/report.xlsx")
 def report(run_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     run = _owned_run(db, current_user.id, run_id)
-    if run.status not in ("completed", "partial"):
+    if run.status not in RESULT_STATUSES:
         raise HTTPException(status_code=409, detail="任务尚未完成")
     output = build_report(db, run)
     filename = quote(f"{run.tracked_keyword.keyword}_MY_marketplace.xlsx")
@@ -239,12 +256,12 @@ def dashboard(db: Session = Depends(get_db), current_user: User = Depends(get_cu
     keywords = db.query(TrackedKeyword).filter(TrackedKeyword.user_id == current_user.id).all()
     keyword_ids = [item.id for item in keywords]
     runs = db.query(AnalysisRun).filter(AnalysisRun.keyword_id.in_(keyword_ids)).order_by(AnalysisRun.id.desc()).limit(50).all() if keyword_ids else []
-    completed_ids = [run.id for run in runs if run.status in ("completed", "partial")]
+    completed_ids = [run.id for run in runs if run.status in RESULT_STATUSES]
     platform_counts = dict(db.query(ListingSnapshot.platform, func.count(ListingSnapshot.id)).filter(ListingSnapshot.run_id.in_(completed_ids)).group_by(ListingSnapshot.platform).all()) if completed_ids else {}
     return {"success": True, "data": {
         "keyword_count": len(keywords), "tracking_count": sum(bool(x.tracking_enabled) for x in keywords),
         "needs_verification": sum(x.status == "needs_verification" for x in runs),
-        "completed_runs": sum(x.status in ("completed", "partial") for x in runs),
+        "completed_runs": sum(x.status in RESULT_STATUSES for x in runs),
         "platform_counts": platform_counts,
         "latest_runs": [_run_payload(run) for run in runs[:8]],
         "score_history": [{"run_id": run.id, "keyword": run.tracked_keyword.keyword, "score": run.opportunity_score, "created_at": _iso(run.created_at)} for run in reversed(runs) if run.opportunity_score is not None][-30:],
