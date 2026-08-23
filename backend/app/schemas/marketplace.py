@@ -3,7 +3,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field, field_validator
 
+from app.core.config import get_settings
+
 Platform = Literal["shopee", "lazada"]
+settings = get_settings()
 
 
 def _clean_time(value: str) -> str:
@@ -12,7 +15,7 @@ def _clean_time(value: str) -> str:
         if len(parts) != 2:
             raise ValueError
         hour, minute = (int(part) for part in parts)
-    except (TypeError, ValueError) as exc:
+    except Exception as exc:
         raise ValueError("时间格式必须为 HH:MM") from exc
     if not 0 <= hour <= 23 or not 0 <= minute <= 59:
         raise ValueError("时间格式必须为 HH:MM")
@@ -31,10 +34,10 @@ def _clean_timezone(value: str) -> str:
 class KeywordCreate(BaseModel):
     keyword: str = Field(min_length=2, max_length=200)
     platforms: list[Platform] = Field(default_factory=lambda: ["shopee", "lazada"])
-    results_limit: int = Field(default=20, ge=10, le=40)
+    results_limit: int = Field(default=settings.DEFAULT_RESULTS_LIMIT, ge=10, le=40)
     tracking_enabled: bool = True
-    daily_time: str = "20:00"
-    timezone: str = "Asia/Kuala_Lumpur"
+    daily_time: str = settings.DEFAULT_DAILY_TIME
+    timezone: str = settings.DEFAULT_TIMEZONE
 
     @field_validator("keyword")
     @classmethod
