@@ -20,6 +20,7 @@ export default function AIAnalysis() {
   const run = item?.latest_run;
   const analysis = run?.analysis || {};
   const segments = (analysis.opportunity_segments || []) as OpportunitySegment[];
+  const supportedSegments = segments.filter((segment) => segment.evidence_status === "supported").length;
 
   return <div className="page-stack">
     <section className="section-heading">
@@ -45,23 +46,27 @@ export default function AIAnalysis() {
       </section>
 
       {segments.length > 0 && <section className="panel">
-        <div className="panel-title"><div><span>PRODUCT FAMILIES</span><h3>商品族机会排序</h3></div><Sparkles /></div>
-        <p className="method-note"><AlertCircle /> 按搜索标题里反复出现的属性做轻量拆分，用来缩小验证范围，不等同于 Shopee / Lazada 官方类目。</p>
+        <div className="panel-title"><div><span>PRODUCT FAMILIES</span><h3>商品族候选排序</h3></div><Sparkles /></div>
+        <p className="method-note"><AlertCircle /> 按搜索标题里反复出现的属性做轻量拆分，用来缩小验证范围，不等同于 Shopee / Lazada 官方类目。只有跨所选平台、样本量和完整度都达标的子方向才标记为“证据支持”；其余仅是探索候选。</p>
         <div className="table-shell">
           <table>
             <thead><tr><th>#</th><th>商品族</th><th>机会分</th><th>样本</th><th>平台证据</th><th>中位价</th><th>卖家集中度</th><th>代表商品</th></tr></thead>
-            <tbody>{segments.map((segment, index) => <tr key={`${segment.label}-${index}`}>
-              <td><b>#{index + 1}</b></td>
-              <td><strong>{segment.label}</strong><small>{segment.verdict} · 完整度 {segment.confidence}%</small></td>
-              <td><strong>{segment.opportunity_score}</strong></td>
-              <td>{segment.sample_size} 条<small>占相关结果 {segment.share}%</small></td>
-              <td>{segment.platform_coverage}%</td>
-              <td>{segment.median_price == null ? "—" : `RM ${segment.median_price.toFixed(2)}`}</td>
-              <td>{segment.seller_concentration == null ? "证据不足" : `${segment.seller_concentration.toFixed(1)} / 100`}</td>
-              <td>{segment.representative_titles.slice(0, 2).map((title) => <small key={title}>{title}</small>)}</td>
-            </tr>)}</tbody>
+            <tbody>{segments.map((segment, index) => {
+              const supported = segment.evidence_status === "supported";
+              return <tr key={`${segment.label}-${index}`}>
+                <td><b>#{index + 1}</b></td>
+                <td><strong>{segment.label}</strong><small>{supported ? `${segment.verdict} · 证据支持` : "探索候选，不作备货结论"} · 完整度 {segment.confidence}%</small></td>
+                <td><strong>{segment.opportunity_score}</strong><small>{supported ? "可进入下一步验证" : "仅用于候选排序"}</small></td>
+                <td>{segment.sample_size} 条<small>占相关结果 {segment.share}%</small></td>
+                <td>{segment.platform_coverage}%<small>{supported ? "所选平台均有充分证据" : "证据尚未完全覆盖"}</small></td>
+                <td>{segment.median_price == null ? "—" : `RM ${segment.median_price.toFixed(2)}`}</td>
+                <td>{segment.seller_concentration == null ? "证据不足" : `${segment.seller_concentration.toFixed(1)} / 100`}</td>
+                <td>{segment.representative_titles.slice(0, 2).map((title) => <small key={title}>{title}</small>)}</td>
+              </tr>;
+            })}</tbody>
           </table>
         </div>
+        <p className="method-note"><AlertCircle /> 当前 {segments.length} 个候选中，{supportedSegments} 个达到“证据支持”门槛。</p>
       </section>}
 
       <section className="panel recommendation-panel">
