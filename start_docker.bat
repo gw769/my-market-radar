@@ -63,15 +63,23 @@ if errorlevel 1 (
     goto waitloop
 )
 echo [OK] Backend is ready.
+
 :opendone
-start "" http://localhost:8011
+powershell -NoProfile -Command "$paths=@((Join-Path $env:ProgramFiles 'Google\Chrome\Application\chrome.exe'),(Join-Path ${env:ProgramFiles(x86)} 'Google\Chrome\Application\chrome.exe'),(Join-Path $env:LOCALAPPDATA 'Google\Chrome\Application\chrome.exe')); $chrome=$paths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1; if($chrome){ Start-Process -FilePath $chrome -ArgumentList 'http://localhost:8011'; exit 0 }; exit 1" >nul 2>&1
+if errorlevel 1 (
+    echo [WARN] Google Chrome not found. Falling back to the Windows default browser.
+    start "" http://localhost:8011
+) else (
+    echo [OK] Opened MY Market Radar in Google Chrome.
+)
 
 echo.
 echo ================================================================
 echo   SERVICE IS RUNNING
-echo   Open:  http://localhost:8011
-echo   Login: admin@market.my / admin123
-echo   Stop:  double-click stop_docker.bat
-echo ================================================================
+ echo   Open:  http://localhost:8011
+ echo   Login: admin@market.my / admin123
+ echo   Stop:  double-click stop_docker.bat
+ echo   Network: localhost only by default
+ echo ================================================================
 echo.
 pause
