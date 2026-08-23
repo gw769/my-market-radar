@@ -68,7 +68,11 @@ DEFAULT_RESULTS_LIMIT=20
 DEFAULT_DAILY_TIME=20:00
 DEFAULT_TIMEZONE=Asia/Kuala_Lumpur
 COLLECTION_TIMEOUT_SECONDS=45
+RUN_HEARTBEAT_SECONDS=10
+RUN_STALE_AFTER_SECONDS=240
 ```
+
+`RUN_HEARTBEAT_SECONDS` 是运行中采集任务续租间隔；`RUN_STALE_AFTER_SECONDS` 是多久没有心跳后由 watchdog 判定 worker 已失效并恢复任务。恢复使用普通 `worker_id + heartbeat_at`，不引入签名或额外密码学机制。
 
 Windows 环境会通过 Python 依赖 `tzdata` 获得 IANA 时区数据库，因此 `Asia/Kuala_Lumpur` 不依赖操作系统自带时区文件。
 
@@ -78,9 +82,34 @@ Windows 环境会通过 Python 依赖 `tzdata` 获得 IANA 时区数据库，因
 - 公开已售数只在各平台内部解释，不跨平台直接比较。
 - 需求信号、进入门槛、价格空间均为启发式指标，不是利润或真实销量预测。
 - 搜索结果先做关键词相关性过滤；配件、明显多件装和低相关漂移不会进入机会评分。
+- `RM 10 - RM 40` 这类变体价格区间不会拿最低价冒充可比单价。
+- `1.2k+ sold/reviews` 等公开计数按页面表达解析；`2 units`、`1+1`、`buy 1 free 1` 等明显多件装默认排除。
 - 缺失字段保留为空，不填零，也不会把剩余权重放大；证据不足时明确显示“数据不足”。
-- 有稳定卖家标识时才启用卖家集中度；缺失时不猜。
+- 有稳定卖家标识时才启用卖家集中度；其权重按 seller identity 覆盖可靠度衰减，缺失时不猜。
 - 商品族排序来自重复标题属性的轻量聚类，用于缩小验证范围，不等同于平台官方类目。
+
+## 采集健康度与证据等级
+
+市场数据弱和采集器坏掉都可能表现为“样本少”，所以系统把这两件事分开判断。
+
+每个平台会记录 collector health：
+
+- raw 搜索卡片数量
+- parsed 可解析商品数量与解析率
+- 相对 `results_limit` 的样本覆盖
+- 价格、销量、评论、评分、卖家标识覆盖率
+- `healthy / degraded / unhealthy / empty / error` 状态和警告
+
+如果页面明明有很多 raw cards，但 parser 只能解析很少结果，会明确提示“页面结构可能变化”，不会只把它解释成市场需求弱。
+
+综合分析同时给出 Evidence A/B/C/D：
+
+- **A · 高可信**：双平台均达到评分门槛，完整度、采集健康度和样本量都高。
+- **B · 可参考**：核心证据可用，但平台数、完整度或样本量没有达到 A。
+- **C · 弱证据**：仍有参考信号，但不允许把弱证据包装成强推荐；原始“建议尝试”会降级为“谨慎观察”。
+- **D · 证据不足**：不输出强机会分/强选品结论，优先检查采集健康度并补数据。
+
+分析页和 Excel 都会显示证据等级及 collector health，方便判断是“市场不行”还是“采集器不行”。
 
 ## 任务、历史与稳定结果
 
@@ -92,6 +121,10 @@ Windows 环境会通过 Python 依赖 `tzdata` 获得 IANA 时区数据库，因
 - failed/partial 点击重试会创建新的 run，不覆盖旧任务和旧快照。
 - 验证码属于同一次任务暂停，验证完成后继续原 run。
 - 所有平台都没有有效商品时任务会标记为 `failed`，不会生成伪 partial 报告。
+
+运行中的 run 会保存 `worker_id` 和 `heartbeat_at`。scheduler 每 30 秒执行 watchdog：超过 `RUN_STALE_AFTER_SECONDS` 没有心跳的 running run 会恢复为 pending 并重新入队。旧 worker 后续如果恢复，由于 worker_id 已失效，不能再覆盖新 worker 的 checkpoint 或最终结果。
+
+现有本地数据库启动时会通过轻量 additive schema sync 自动补上新的 nullable heartbeat 列，不要求额外迁移框架。
 
 Excel 的趋势页只纳入 completed/partial 快照，运行中、验证码暂停和失败任务的恢复 checkpoint 不参与趋势。
 
