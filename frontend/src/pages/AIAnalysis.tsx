@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { AlertCircle, ArrowRight, CheckCircle2, Gauge, Sparkles } from "lucide-react";
+import { Activity, AlertCircle, ArrowRight, CheckCircle2, Gauge, Sparkles } from "lucide-react";
 import { apiGet } from "@/lib/api";
 import type { Keyword, OpportunitySegment, PlatformScore } from "@/types";
 
@@ -9,6 +9,7 @@ const RESULT_STATUSES = new Set(["completed", "partial"]);
 export default function AIAnalysis() {
   const [keywords, setKeywords] = useState<Keyword[]>([]);
   const [keywordId, setKeywordId] = useState(0);
+  const [trend, setTrend] = useState<any>(null);
   const load = useCallback(() => apiGet<any>("/keywords").then((r) => {
     const rows = r.data || [];
     setKeywords(rows);
@@ -28,6 +29,19 @@ export default function AIAnalysis() {
   const run = latestRun && RESULT_STATUSES.has(latestRun.status)
     ? latestRun
     : item?.latest_result_run;
+
+  useEffect(() => {
+    if (!keywordId) {
+      setTrend(null);
+      return;
+    }
+    let cancelled = false;
+    apiGet<any>(`/trends/keywords/${keywordId}`)
+      .then((response) => { if (!cancelled) setTrend(response.data || null); })
+      .catch(() => { if (!cancelled) setTrend(null); });
+    return () => { cancelled = true; };
+  }, [keywordId, run?.id]);
+
   const analysis = run?.analysis || {};
   const segments = (analysis.opportunity_segments || []) as OpportunitySegment[];
   const evidence = analysis.evidence || null;
@@ -39,7 +53,7 @@ export default function AIAnalysis() {
       <div>
         <span className="eyebrow">EVIDENCE-GATED HEURISTIC</span>
         <h2>分析建议</h2>
-        <p>缺少核心公开字段时不放大剩余权重；配件、多件装和低相关结果不进入评分，并独立检查采集器健康度。</p>
+        <p>缺少核心公开字段时不放大剩余权重；配件、多件装和低相关结果不进入评分，并独立检查采集器健康度与跨快照近期动量。</p>
       </div>
       <select value={keywordId} onChange={(e) => setKeywordId(Number(e.target.value))}>
         {keywords.map((x) => <option value={x.id} key={x.id}>{x.keyword}</option>)}
@@ -76,6 +90,37 @@ export default function AIAnalysis() {
             </tr>)}</tbody>
           </table>
         </div>}
+      </section>}
+
+      {trend && <section className="panel chart-panel">
+        <div className="panel-title"><div><span>TEMPORAL EVIDENCE</span><h3>近期销量 / 评论动量</h3></div><Activity /></div>
+        {trend.status === "insufficient_history" ? <div className="method-note"><Activity /> {trend.message}</div> : <>
+          <p className="method-note"><Activity /> {trend.message} 当前对比间隔 {trend.interval_hours} 小时；这是辅助证据，暂不直接改写主机会分。</p>
+          {trend.overall && <div className="stat-grid">
+            <article className="stat-card"><span>历史匹配</span><strong>{trend.overall.matched_items}</strong><small>{trend.overall.match_rate}% · 可靠度 {trend.overall.reliability}%</small></article>
+            <article className="stat-card"><span>近期活跃商品</span><strong>{trend.overall.activity_share == null ? "—" : `${trend.overall.activity_share}%`}</strong><small>sold 或 review 有增长</small></article>
+            <article className="stat-card"><span>中位 Sold / 日</span><strong>{trend.overall.median_sold_velocity_per_day ?? "—"}</strong><small>中位增量 {trend.overall.median_sold_delta ?? "—"}</small></article>
+            <article className="stat-card"><span>价格中位波动</span><strong>{trend.overall.median_abs_price_change_pct == null ? "—" : `${trend.overall.median_abs_price_change_pct}%`}</strong><small>排名中位变化 {trend.overall.median_rank_change ?? "—"}</small></article>
+          </div>}
+          {trend.recommendations?.length > 0 && <div className="recommendation-list">
+            {trend.recommendations.map((text: string, index: number) => <article key={index}><CheckCircle2 /><span>{text}</span><ArrowRight /></article>)}
+          </div>}
+          <div className="table-shell">
+            <table>
+              <thead><tr><th>平台</th><th>匹配率</th><th>活跃占比</th><th>Sold / 日</th><th>Review / 日</th><th>价格波动</th><th>排名变化</th><th>可靠度</th></tr></thead>
+              <tbody>{Object.entries(trend.platforms || {}).map(([name, value]: [string, any]) => <tr key={name}>
+                <td><strong>{name}</strong></td>
+                <td>{value.matched_items}/{value.current_items}<small>{value.match_rate}%</small></td>
+                <td>{value.activity_share == null ? "—" : `${value.activity_share}%`}</td>
+                <td>{value.median_sold_velocity_per_day ?? "—"}</td>
+                <td>{value.median_review_velocity_per_day ?? "—"}</td>
+                <td>{value.median_abs_price_change_pct == null ? "—" : `${value.median_abs_price_change_pct}%`}</td>
+                <td>{value.median_rank_change ?? "—"}</td>
+                <td>{value.reliability}%</td>
+              </tr>)}</tbody>
+            </table>
+          </div>
+        </>}
       </section>}
 
       <section className="platform-analysis">
