@@ -87,8 +87,10 @@ def _safe_rating(value: Any) -> float | None:
     return rating if 0 <= rating <= 5 else None
 
 
+# A singular label such as "4.8 rating" usually describes the rating score, not a count.
+# Only plural "ratings" is accepted as a count label; reviews and Malay count labels remain valid.
 _REVIEW_PATTERNS = (
-    r"([0-9,.]+\s*[km]?)\s*(?:reviews?|ratings?|ulasan|penilaian)",
+    r"([0-9,.]+\s*[km]?)\s*(?:reviews?|ratings|ulasan|penilaian)\b",
 )
 
 
@@ -150,7 +152,7 @@ class ShopeeMalaysiaAdapter(MarketplaceAdapter):
           const price = text.match(/RM\s*[0-9,.]+/i)?.[0] || null;
           const sold = text.match(/[0-9,.]+\s*[km]?\s*(?:sold|terjual)/i)?.[0] || null;
           const reviews = ratingArea.match(/\(([0-9,.]+\s*[km]?)\)/)?.[1]
-            || text.match(/([0-9,.]+\s*[km]?)\s*(?:reviews?|ratings?|ulasan|penilaian)/i)?.[1] || null;
+            || text.match(/([0-9,.]+\s*[km]?)\s*(?:reviews?|ratings|ulasan|penilaian)\b/i)?.[1] || null;
           const rating = ratingText.match(/\b[0-5](?:\.[0-9])?\b/)?.[0]
             || text.match(/(?:rating|rated|bintang)\s*[:\-]?\s*([0-5](?:\.[0-9])?)/i)?.[1] || null;
           return {href, text, title: a.getAttribute('aria-label') || a.title || text.split('\n')[0],
@@ -221,7 +223,7 @@ class LazadaMalaysiaAdapter(MarketplaceAdapter):
             rating: ratingText.match(/\b[0-5](?:\.[0-9])?\b/)?.[0]
               || text.match(/(?:rating|rated|bintang)\s*[:\-]?\s*([0-5](?:\.[0-9])?)/i)?.[1] || null,
             reviews: ratingArea.match(/\(([0-9,.]+\s*[km]?)\)/)?.[1]
-              || text.match(/([0-9,.]+\s*[km]?)\s*(?:reviews?|ratings?|ulasan|penilaian)/i)?.[1] || null,
+              || text.match(/([0-9,.]+\s*[km]?)\s*(?:reviews?|ratings|ulasan|penilaian)\b/i)?.[1] || null,
             seller: null, location: text.split('\n').slice(-1)[0] || null,
             sponsored: /sponsored|iklan/i.test(text), item_id: itemId || null, shop_id: null};
         })"""
