@@ -6,6 +6,17 @@ import statistics
 from typing import Any
 
 
+ACCESSORY_TERMS = {
+    "accessory", "accessories", "replacement", "spare", "part", "parts",
+    "cover", "sleeve", "holder", "pouch", "bag", "strap", "cap", "lid",
+    "brush", "cleaner", "cleaning", "sticker", "decal", "stand", "rack",
+    "carrier", "protector", "shell", "case",
+    "sarung", "penutup", "pemegang", "berus", "tali", "ganti",
+}
+BUNDLE_TERMS = {"bundle", "combo", "set", "pack", "pcs", "piece", "pieces"}
+INCLUSION_CONNECTORS = {"with", "dengan", "including", "include", "includes", "plus"}
+
+
 def _mean(values: list[float]) -> float | None:
     return statistics.mean(values) if values else None
 
@@ -28,20 +39,108 @@ def _tokens(value: str) -> list[str]:
     return [token for token in re.findall(r"[\w]+", value.lower(), flags=re.UNICODE) if token]
 
 
+def _is_ascii_word(value: str) -> bool:
+    return bool(value) and all(ch.isascii() and (ch.isalnum() or ch == "_") for ch in value)
+
+
+def _normalized_text(value: str) -> str:
+    return " ".join(_tokens(value))
+
+
+def _query_extra_terms(keyword: str, title: str, candidates: set[str]) -> set[str]:
+    query_tokens = set(_tokens(keyword))
+    title_tokens = set(_tokens(title))
+    return {term for term in candidates if term in title_tokens and term not in query_tokens}
+
+
+def _looks_like_accessory(keyword: str, title: str) -> bool:
+    query = _normalized_text(keyword)
+    normalized = _normalized_text(title)
+    if not query or not normalized:
+        return False
+
+    extra_accessories = _query_extra_terms(keyword, title, ACCESSORY_TERMS)
+    if not extra_accessories:
+        return False
+
+    title_tokens = _tokens(title)
+    query_tokens = _tokens(keyword)
+    if not title_tokens or not query_tokens:
+        return False
+
+    if (f" for {query}" in f" {normalized}" or f" untuk {query}" in f" {normalized}"):
+        return True
+
+    first_window = set(title_tokens[:4])
+    if first_window & extra_accessories:
+        if query in normalized or all(token in title_tokens for token in query_tokens):
+            if not first_window & INCLUSION_CONNECTORS:
+                return True
+
+    phrase_index = normalized.find(query)
+    if phrase_index >= 0:
+        before = _tokens(normalized[:phrase_index])
+        after = _tokens(normalized[phrase_index + len(query):])
+        for index, token in enumerate(after[:4]):
+            if token not in extra_accessories:
+                continue
+            previous = after[index - 1] if index > 0 else None
+            if previous in INCLUSION_CONNECTORS:
+                continue
+            return True
+        if before:
+            last_prefix = set(before[-3:])
+            if last_prefix & extra_accessories and not last_prefix & INCLUSION_CONNECTORS:
+                return True
+
+    return False
+
+
+def _looks_like_bundle(keyword: str, title: str) -> bool:
+    query_tokens = set(_tokens(keyword))
+    if query_tokens & BUNDLE_TERMS:
+        return False
+
+    normalized = _normalized_text(title)
+    if not normalized:
+        return False
+
+    if re.search(r"\b(?:bundle|combo)\b", normalized):
+        return True
+    if re.search(r"\b\d+\s*(?:pcs|pieces|pack)\b", normalized):
+        return True
+    if re.search(r"\b(?:set|pack)\s+of\s+\d+\b", normalized):
+        return True
+    if re.search(r"\b\d+\s*x\s+", normalized):
+        return True
+    return False
+
+
 def relevance_score(keyword: str, title: str) -> float:
     keyword = " ".join(keyword.lower().split())
     title = " ".join(title.lower().split())
     if not keyword or not title:
         return 0.0
+
+    if _looks_like_accessory(keyword, title):
+        return 0.2
+    if _looks_like_bundle(keyword, title):
+        return 0.55
+
     if keyword in title:
         return 1.0
+
     query_tokens = list(dict.fromkeys(_tokens(keyword)))
     title_tokens = set(_tokens(title))
     if not query_tokens:
         return 0.0
+
     if len(query_tokens) == 1:
         token = query_tokens[0]
-        return 1.0 if token in title_tokens or token in title else 0.0
+        if _is_ascii_word(token):
+            return 1.0 if token in title_tokens else 0.0
+        return 1.0 if token in title else 0.0
+
     overlap = sum(token in title_tokens for token in query_tokens) / len(query_tokens)
     compact_query = "".join(query_tokens)
     compact_title = "".join(_tokens(title))
@@ -50,11 +149,29 @@ def relevance_score(keyword: str, title: str) -> float:
     return round(overlap, 4)
 
 
-def _relevant_items(items: list[dict[str, Any]], keyword: str | None) -> tuple[list[dict[str, Any]], int]:
+def _exclusion_reason(keyword: str, title: str) -> str | None:
+    if _looks_like_accessory(keyword, title):
+        return "accessory"
+    if _looks_like_bundle(keyword, title):
+        return "bundle"
+    return None if relevance_score(keyword, title) >= 0.6 else "low_relevance"
+
+
+def _relevant_items(
+    items: list[dict[str, Any]], keyword: str | None
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
     if not keyword:
-        return items, 0
-    kept = [item for item in items if relevance_score(keyword, str(item.get("title") or "")) >= 0.6]
-    return kept, max(0, len(items) - len(kept))
+        return items, {"accessory": 0, "bundle": 0, "low_relevance": 0}
+    kept: list[dict[str, Any]] = []
+    excluded = {"accessory": 0, "bundle": 0, "low_relevance": 0}
+    for item in items:
+        title = str(item.get("title") or "")
+        reason = _exclusion_reason(keyword, title)
+        if reason:
+            excluded[reason] += 1
+        else:
+            kept.append(item)
+    return kept, excluded
 
 
 def _coverage(items: list[dict[str, Any]], field: str) -> float:
@@ -107,7 +224,8 @@ def _verdict(score: float | None, eligible: bool = True) -> str:
 
 def score_platform(items: list[dict[str, Any]], keyword: str | None = None) -> dict[str, Any]:
     raw_sample_size = len(items)
-    items, excluded_irrelevant = _relevant_items(items, keyword)
+    items, exclusion_breakdown = _relevant_items(items, keyword)
+    excluded_irrelevant = sum(exclusion_breakdown.values())
     sample_size = len(items)
     prices = [float(x["price"]) for x in items if x.get("price") is not None and float(x["price"]) > 0]
     sold = [float(x["sold_count"]) for x in items if x.get("sold_count") is not None]
@@ -133,11 +251,20 @@ def score_platform(items: list[dict[str, Any]], keyword: str | None = None) -> d
     incumbent_known = [x for x in items if x.get("rating") is not None and x.get("review_count") is not None]
     incumbent_coverage = len(incumbent_known) / sample_size if sample_size else 0
     strong_incumbent_share = (
-        sum(1 for x in incumbent_known if float(x["rating"]) >= 4.8 and float(x["review_count"]) >= 100) / len(incumbent_known) * 100
-        if incumbent_known and incumbent_coverage >= 0.25 else None
+        sum(1 for x in incumbent_known if float(x["rating"]) >= 4.8 and float(x["review_count"]) >= 100)
+        / len(incumbent_known)
+        * 100
+        if incumbent_known and incumbent_coverage >= 0.25
+        else None
     )
-    sponsored_share = sum(known_ads) / len(known_ads) * 100 if known_ads and coverage["is_sponsored"] >= 0.5 else None
-    barrier, barrier_reliability = _weighted_with_neutral([(review_barrier, 0.5), (strong_incumbent_share, 0.3), (sponsored_share, 0.2)])
+    sponsored_share = (
+        sum(known_ads) / len(known_ads) * 100
+        if known_ads and coverage["is_sponsored"] >= 0.5
+        else None
+    )
+    barrier, barrier_reliability = _weighted_with_neutral(
+        [(review_barrier, 0.5), (strong_incumbent_share, 0.3), (sponsored_share, 0.2)]
+    )
     entry_ease = 100 - barrier if barrier is not None else None
 
     minimum_prices = max(4, math.ceil(sample_size * 0.4))
@@ -145,13 +272,26 @@ def score_platform(items: list[dict[str, Any]], keyword: str | None = None) -> d
     price_reliability = min(1.0, coverage["price"] / 0.8) if price_room is not None else 0.0
 
     dimensions = {"demand": demand, "entry_ease": entry_ease, "price_room": price_room}
-    score, dimension_weight = _weighted_with_neutral([(demand, 0.4), (entry_ease, 0.35), (price_room, 0.25)])
-    evidence_reliability = 0.4 * demand_reliability + 0.35 * barrier_reliability + 0.25 * price_reliability
+    score, dimension_weight = _weighted_with_neutral(
+        [(demand, 0.4), (entry_ease, 0.35), (price_room, 0.25)]
+    )
+    evidence_reliability = (
+        0.4 * demand_reliability + 0.35 * barrier_reliability + 0.25 * price_reliability
+    )
 
     field_coverage = statistics.mean(coverage.values()) if coverage else 0.0
     sample_coverage = min(1.0, sample_size / 20)
     relevance_coverage = sample_size / raw_sample_size if raw_sample_size else 0.0
-    confidence = round((field_coverage * 0.45 + sample_coverage * 0.25 + relevance_coverage * 0.15 + evidence_reliability * 0.15) * 100, 1)
+    confidence = round(
+        (
+            field_coverage * 0.45
+            + sample_coverage * 0.25
+            + relevance_coverage * 0.15
+            + evidence_reliability * 0.15
+        )
+        * 100,
+        1,
+    )
 
     eligibility_reasons: list[str] = []
     if sample_size < 10:
@@ -174,9 +314,13 @@ def score_platform(items: list[dict[str, Any]], keyword: str | None = None) -> d
         "sample_size": sample_size,
         "raw_sample_size": raw_sample_size,
         "excluded_irrelevant": excluded_irrelevant,
+        "exclusion_breakdown": exclusion_breakdown,
         "eligibility_reasons": eligibility_reasons,
         "coverage": {key: round(value * 100, 1) for key, value in coverage.items()},
-        "dimensions": {key: round(value, 1) if value is not None else None for key, value in dimensions.items()},
+        "dimensions": {
+            key: round(value, 1) if value is not None else None
+            for key, value in dimensions.items()
+        },
         "metrics": {
             "median_price": round(_median(prices), 2) if prices else None,
             "min_price": round(min(prices), 2) if prices else None,
@@ -191,12 +335,23 @@ def score_platform(items: list[dict[str, Any]], keyword: str | None = None) -> d
 
 
 def build_analysis(keyword: str, by_platform: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
-    platform_scores = {platform: score_platform(items, keyword=keyword) for platform, items in by_platform.items()}
+    platform_scores = {
+        platform: score_platform(items, keyword=keyword)
+        for platform, items in by_platform.items()
+    }
     requested = list(platform_scores.values())
     eligible = [result for result in requested if result["eligible"]]
     all_eligible = bool(requested) and len(eligible) == len(requested)
-    combined_score = round(statistics.mean(x["score"] for x in eligible), 1) if all_eligible else None
-    confidence = round(statistics.mean(x["confidence"] for x in requested), 1) if requested else 0
+    combined_score = (
+        round(statistics.mean(x["score"] for x in eligible), 1)
+        if all_eligible
+        else None
+    )
+    confidence = (
+        round(statistics.mean(x["confidence"] for x in requested), 1)
+        if requested
+        else 0
+    )
     verdict = _verdict(combined_score, all_eligible)
 
     recommendations: list[str] = []
@@ -207,10 +362,19 @@ def build_analysis(keyword: str, by_platform: dict[str, list[dict[str, Any]]]) -
                 reason = "；".join(result["eligibility_reasons"][:3]) or "数据不足"
                 recommendations.append(f"{platform.title()}：{reason}。")
     else:
-        recommendations.append(f"“{keyword}”当前公开数据机会分为 {combined_score}，结论：{verdict}。")
-        medians = [x["metrics"]["median_price"] for x in eligible if x["metrics"]["median_price"] is not None]
+        recommendations.append(
+            f"“{keyword}”当前公开数据机会分为 {combined_score}，结论：{verdict}。"
+        )
+        medians = [
+            x["metrics"]["median_price"]
+            for x in eligible
+            if x["metrics"]["median_price"] is not None
+        ]
         if medians:
-            recommendations.append(f"相关商品公开中位价约 RM {statistics.mean(medians):.2f}；优先围绕该价格带验证差异化卖点，而不是直接按最低价竞争。")
+            recommendations.append(
+                f"相关商品公开中位价约 RM {statistics.mean(medians):.2f}；"
+                "优先围绕该价格带验证差异化卖点，而不是直接按最低价竞争。"
+            )
         if any((x["metrics"]["median_reviews"] or 0) >= 200 for x in eligible):
             recommendations.append("头部商品评论门槛较高，新商品需要更明确的卖点与首批评价策略。")
         if any((x["metrics"]["sponsored_share"] or 0) >= 35 for x in eligible):
@@ -218,9 +382,25 @@ def build_analysis(keyword: str, by_platform: dict[str, list[dict[str, Any]]]) -
         if any((x["metrics"]["price_dispersion"] or 0) > 0.6 for x in eligible):
             recommendations.append("价格分布非常分散，可能混有规格/套装差异；下单前应进一步拆分子品类验证。")
 
-    excluded = sum(x["excluded_irrelevant"] for x in requested)
+    excluded_accessories = sum(
+        x.get("exclusion_breakdown", {}).get("accessory", 0) for x in requested
+    )
+    excluded_bundles = sum(
+        x.get("exclusion_breakdown", {}).get("bundle", 0) for x in requested
+    )
+    excluded_low_relevance = sum(
+        x.get("exclusion_breakdown", {}).get("low_relevance", 0) for x in requested
+    )
+    excluded = excluded_accessories + excluded_bundles + excluded_low_relevance
     if excluded:
-        recommendations.append(f"已从机会评分中排除 {excluded} 条与关键词相关性偏低的搜索结果。")
+        detail: list[str] = []
+        if excluded_accessories:
+            detail.append(f"{excluded_accessories} 条配件/替换件")
+        if excluded_bundles:
+            detail.append(f"{excluded_bundles} 条套装/多件装")
+        if excluded_low_relevance:
+            detail.append(f"{excluded_low_relevance} 条低相关结果")
+        recommendations.append(f"已从机会评分样本中排除 {'、'.join(detail)}，避免污染价格与竞争度。")
 
     return {
         "keyword": keyword,
@@ -229,5 +409,10 @@ def build_analysis(keyword: str, by_platform: dict[str, list[dict[str, Any]]]) -
         "confidence": confidence,
         "platform_scores": platform_scores,
         "recommendations": recommendations,
-        "methodology": "公开数据启发式评分：需求信号 40%、进入门槛 35%、价格空间 25%。缺失证据不会被剩余字段放大，而会向中性分收缩；相关样本、字段覆盖和完整度不足时不输出强结论。",
+        "methodology": (
+            "公开数据启发式评分：需求信号 40%、进入门槛 35%、价格空间 25%。"
+            "缺失证据不会被剩余字段放大，而会向中性分收缩；"
+            "配件/替换件、明显多件装和低相关搜索漂移会从评分样本中排除；"
+            "相关样本、字段覆盖和完整度不足时不输出强结论。"
+        ),
     }
