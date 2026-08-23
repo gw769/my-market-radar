@@ -9,6 +9,7 @@ from app.core.logging import logger
 
 settings = get_settings()
 SQLITE_BUSY_TIMEOUT_MS = 30_000
+MYSQL_CONNECT_TIMEOUT_SECONDS = 10
 
 
 def _configure_sqlite_connection(dbapi_connection, _connection_record) -> None:
@@ -22,14 +23,28 @@ def _configure_sqlite_connection(dbapi_connection, _connection_record) -> None:
         cursor.close()
 
 
+def _configure_mysql_connection(dbapi_connection, _connection_record) -> None:
+    # Model server defaults use NOW(). Pin the session to UTC so naive DateTime rows match the
+    # UTC-naive values written by application code and _iso() never mislabels server-local time.
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("SET time_zone = '+00:00'")
+    finally:
+        cursor.close()
+
+
 def _attach_engine_guards(engine, db_type: str) -> None:
     if db_type == "sqlite":
         event.listen(engine, "connect", _configure_sqlite_connection)
+    elif db_type == "mysql":
+        event.listen(engine, "connect", _configure_mysql_connection)
 
 
 def _sync_engine_options(db_type: str) -> dict:
     if db_type == "sqlite":
         return {"connect_args": {"timeout": SQLITE_BUSY_TIMEOUT_MS / 1000}}
+    if db_type == "mysql":
+        return {"connect_args": {"connect_timeout": MYSQL_CONNECT_TIMEOUT_SECONDS}}
     return {}
 
 
@@ -73,11 +88,14 @@ def _create_sync_engine():
 
 def _create_async_engine(db_type: str, db_url: str):
     if db_type == "mysql":
-        return create_async_engine(
+        async_engine = create_async_engine(
             db_url.replace("mysql+pymysql://", "mysql+aiomysql://"),
             echo=settings.DEBUG,
             pool_pre_ping=True,
+            connect_args={"connect_timeout": MYSQL_CONNECT_TIMEOUT_SECONDS},
         )
+        _attach_engine_guards(async_engine.sync_engine, "mysql")
+        return async_engine
     async_engine = create_async_engine(
         db_url.replace("sqlite:///", "sqlite+aiosqlite:///"),
         echo=settings.DEBUG,
