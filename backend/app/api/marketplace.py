@@ -270,7 +270,7 @@ def dashboard(db: Session = Depends(get_db), current_user: User = Depends(get_cu
     score_history = [
         {"run_id": run.id, "keyword": run.tracked_keyword.keyword, "score": run.opportunity_score, "created_at": _iso(run.created_at)}
         for run in reversed(recent_runs)
-        if run.opportunity_score is not None
+        if run.status in RESULT_STATUSES and run.opportunity_score is not None
     ][-30:]
 
     stable_run_ids = [result.id for keyword in keywords if (result := _latest_result(db, keyword.id))]
