@@ -33,15 +33,17 @@ def build_report(db: Session, run: AnalysisRun) -> BytesIO:
     summary.append(["数据完整度", f"{run.confidence or 0:.1f}%"])
     summary.append(["数据口径", "公开搜索结果快照；不是利润、真实月销量或转化率预测。"])
     for platform, score in (run.platform_scores or {}).items():
+        platform_score = score.get("score") if score.get("eligible", True) else "—"
+        raw_sample = score.get("raw_sample_size", score.get("sample_size", 0))
+        reasons = "；".join(score.get("eligibility_reasons") or [])
         summary.append([
             f"{platform.title()} 结论",
-            f"{score.get('verdict', '数据不足')}；机会分 {score.get('score', '—')}；"
-            f"样本 {score.get('sample_size', 0)}；完整度 {score.get('confidence', 0)}%",
+            f"{score.get('verdict', '数据不足')}；机会分 {platform_score}；相关样本 {score.get('sample_size', 0)}/{raw_sample}；完整度 {score.get('confidence', 0)}%" + (f"；{reasons}" if reasons else ""),
         ])
     for recommendation in (run.analysis or {}).get("recommendations", []):
         summary.append(["建议", recommendation])
     summary.column_dimensions["A"].width = 22
-    summary.column_dimensions["B"].width = 90
+    summary.column_dimensions["B"].width = 100
 
     columns = ["排名", "商品", "价格(MYR)", "原价(MYR)", "折扣(%)", "公开已售", "评分", "评论数", "店铺", "地区", "广告", "链接", "采集时间"]
     for platform in ("shopee", "lazada"):
@@ -71,9 +73,10 @@ def build_report(db: Session, run: AnalysisRun) -> BytesIO:
     notes = wb.create_sheet("数据口径说明")
     notes.append(["字段", "说明"])
     notes.append(["公开已售", "平台页面当时展示的累计/公开口径，不换算为日销量或月销量。"])
-    notes.append(["机会分", "需求信号40%、进入门槛35%、价格空间25%的可解释启发式评分。"])
-    notes.append(["缺失值", "公开页面未提供的字段显示为“—”，不会填0或估算。"])
-    notes.append(["跨平台", "两个平台分别评分；原始已售数字不直接跨平台比较。"])
+    notes.append(["机会分", "需求信号40%、进入门槛35%、价格空间25%的证据门槛启发式评分。"])
+    notes.append(["缺失值", "公开页面未提供的字段不会填0，也不会把剩余权重放大；证据不足时不输出强结论。"])
+    notes.append(["相关性", "低关键词相关性的搜索漂移结果会保留在原始快照，但从机会评分样本中排除。"])
+    notes.append(["跨平台", "所选平台分别评分；原始已售数字不直接跨平台比较。"])
 
     output = BytesIO()
     wb.save(output)
