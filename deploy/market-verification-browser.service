@@ -1,0 +1,20 @@
+[Unit]
+Description=Resident Shopee and Lazada verification browser
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=james
+Environment=DISPLAY=:1
+Environment=XAUTHORITY=/run/user/1000/gdm/Xauthority
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+ExecStart=/opt/google/chrome/chrome --user-data-dir=/home/james/seerfar-ai-analyzer/backend/data/browser-profile --remote-debugging-address=127.0.0.1 --remote-debugging-port=9223 --no-first-run --disable-background-mode https://shopee.com.my/ https://www.lazada.com.my/
+Restart=always
+RestartSec=3
+KillMode=control-group
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

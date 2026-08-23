@@ -1,0 +1,70 @@
+from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session
+from app.core.database import get_db
+from app.core.security import (
+    verify_password,
+    get_password_hash,
+    create_access_token,
+    get_current_user,
+)
+from app.core.logging import logger
+from app.models.user import User
+from app.schemas.user import UserCreate, UserLogin, UserResponse
+
+router = APIRouter(prefix="/api/auth", tags=["认证"])
+
+
+@router.post("/register")
+def register(user_data: UserCreate, db: Session = Depends(get_db)):
+    logger.info(f"用户注册尝试: {user_data.email}")
+
+    user = db.query(User).filter(User.email == user_data.email).first()
+    if user:
+        return JSONResponse(status_code=400, content={"success": False, "message": "该邮箱已被注册"})
+
+    user = db.query(User).filter(User.username == user_data.username).first()
+    if user:
+        return JSONResponse(status_code=400, content={"success": False, "message": "该用户名已被使用"})
+
+    user = User(
+        username=user_data.username,
+        email=user_data.email,
+        password_hash=get_password_hash(user_data.password),
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    access_token = create_access_token(data={"sub": user.id})
+    logger.info(f"用户注册成功: {user.email}")
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": UserResponse.model_validate(user).model_dump(),
+    }
+
+
+@router.post("/login")
+def login(login_data: UserLogin, db: Session = Depends(get_db)):
+    logger.info(f"登录尝试: {login_data.email}")
+
+    user = db.query(User).filter(User.email == login_data.email).first()
+
+    if not user or not verify_password(login_data.password, user.password_hash):
+        return JSONResponse(status_code=401, content={"success": False, "message": "邮箱或密码错误"})
+
+    access_token = create_access_token(data={"sub": user.id})
+    logger.info(f"用户登录成功: {user.email}")
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": UserResponse.model_validate(user).model_dump(),
+    }
+
+
+@router.get("/me")
+def get_me(current_user: User = Depends(get_current_user)):
+    return UserResponse.model_validate(current_user).model_dump()

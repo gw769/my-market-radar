@@ -1,0 +1,31 @@
+# ─────────────────────────────────────────────────────────────
+#  MY Market Radar · Docker Compose
+#  仅 1 个后端容器（FastAPI 托管前端），SQLite 持久化到命名卷
+#  对方无需安装 MySQL/Redis/Python/Node —— 只需 Docker Desktop
+# ─────────────────────────────────────────────────────────────
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: my-market-radar:latest
+    container_name: my-market-radar
+    ports:
+      - "8011:8000"
+    # .env 为必填（复制 .env.docker.simple 并改名为 .env 后填写）
+    env_file:
+      - .env
+    environment:
+      # SQLite 数据库放到 data 目录（挂载命名卷持久化，重启不丢数据）
+      - DATA_DIR=/app/backend/data
+      # 开启代理时（USE_PROXY=true）：在 .env 中设置
+      #   PROXY_URL=http://host.docker.internal:<你的代理端口>
+      # 注意：Docker 内访问宿主机代理必须用 host.docker.internal（替代 127.0.0.1）
+    volumes:
+      - marketplace_data:/app/backend/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+volumes:
+  marketplace_data:

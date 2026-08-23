@@ -1,0 +1,22 @@
+[
+  {
+    "href": "https://www.lazada.com.my/products/steel-bottle-i3001-s4001.html?search=1",
+    "item_id": "3001",
+    "text": "Steel Bottle\nRM 24.00\nRM 30.00\n2.5k sold\n4.7\n(1.1k)\nSelangor\nSponsored",
+    "title": "Steel Bottle",
+    "price": "RM 24.00",
+    "original_price": "RM 30.00",
+    "sold": "2.5k sold",
+    "rating": "4.7",
+    "reviews": "1.1k",
+    "location": "Selangor",
+    "sponsored": true
+  },
+  {
+    "href": "https://www.lazada.com.my/products/plain-3002.html",
+    "text": "Plain Bottle\nRM 11.50",
+    "title": "Plain Bottle",
+    "price": "RM 11.50",
+    "sponsored": false
+  }
+]

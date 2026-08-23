@@ -1,0 +1,28 @@
+[
+  {
+    "href": "https://shopee.com.my/Bottle-12oz-i.1001.2001?sp_atk=x",
+    "text": "Bottle 12oz\nRM 19.90\n1.2k sold\n4.8\nKuala Lumpur\nSponsored",
+    "title": "Bottle 12oz",
+    "image": "https://img.example/2001.jpg",
+    "price": "RM 19.90",
+    "sold": "1.2k sold",
+    "rating": "4.8",
+    "reviews": "345",
+    "location": "Kuala Lumpur",
+    "sponsored": true
+  },
+  {
+    "href": "https://shopee.com.my/duplicate-i.1001.2001",
+    "text": "Duplicate\nRM 20",
+    "title": "Duplicate",
+    "price": "RM 20"
+  },
+  {
+    "href": "https://shopee.com.my/Second-i.1002.2002",
+    "text": "Second Bottle\nRM 25.00\n82 terjual",
+    "title": "Second Bottle",
+    "price": "RM 25.00",
+    "sold": "82 terjual",
+    "sponsored": false
+  }
+]

@@ -1,0 +1,16 @@
+fastapi==0.109.0
+uvicorn[standard]==0.30.6
+sqlalchemy==2.0.35
+pymysql==1.1.1
+aiomysql==0.2.0
+aiosqlite==0.20.0
+pydantic==2.5.3
+pydantic-settings==2.1.0
+python-dotenv==1.0.1
+python-jose[cryptography]==3.3.0
+openpyxl==3.1.5
+bcrypt==4.0.1
+email-validator==2.3.0
+
+# 常驻 Google Chrome 调试协议客户端（由 uvicorn[standard] 一并提供）
+websockets==17.0.1

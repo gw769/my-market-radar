@@ -1,0 +1,45 @@
+# 环境变量（包含敏感信息）
+.env
+.env.local
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+*.egg-info/
+
+# Playwright 浏览器二进制（689MB，单文件超 GitHub 100MB 限制）
+backend/.playwright_browsers/
+
+# Node
+node_modules/
+.next/
+out/
+dist/
+
+# 数据库
+*.db
+*.sqlite3
+backend/data/
+
+# 日志
+logs/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 构建产物
+*.spec
+*.tsbuildinfo
+build/
+*.exe
