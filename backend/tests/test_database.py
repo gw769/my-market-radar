@@ -1,9 +1,13 @@
 import sqlite3
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from app.core import database
-from app.core.database import SQLITE_BUSY_TIMEOUT_MS, _configure_sqlite_connection
+from app.core.database import (
+    SQLITE_BUSY_TIMEOUT_MS,
+    _configure_mysql_connection,
+    _configure_sqlite_connection,
+)
 
 
 class DatabaseTests(unittest.TestCase):
@@ -19,6 +23,14 @@ class DatabaseTests(unittest.TestCase):
             self.assertIn(journal_mode.lower(), {"memory", "wal"})
         finally:
             connection.close()
+
+    def test_mysql_connections_are_pinned_to_utc(self):
+        cursor = Mock()
+        connection = Mock()
+        connection.cursor.return_value = cursor
+        _configure_mysql_connection(connection, None)
+        cursor.execute.assert_called_once_with("SET time_zone = '+00:00'")
+        cursor.close.assert_called_once()
 
     def test_explicit_mysql_failure_does_not_silently_create_sqlite(self):
         with patch.object(database.settings, "DATABASE_TYPE", "mysql"), patch.object(
