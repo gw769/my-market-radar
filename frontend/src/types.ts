@@ -9,6 +9,7 @@ export interface Run {
 export interface PlatformScore {
   score: number | null; verdict: string; eligible?: boolean; confidence: number; sample_size: number;
   raw_sample_size?: number; excluded_irrelevant?: number; eligibility_reasons?: string[];
+  exclusion_breakdown?: { accessory?: number; bundle?: number; low_relevance?: number };
   coverage?: Record<string, number>;
   dimensions: { demand: number | null; entry_ease: number | null; price_room: number | null };
   metrics: Record<string, number | null>;
