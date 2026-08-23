@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     BROWSER_PROFILE_DIR: str = ""
     BROWSER_EXECUTABLE: str = ""
-    BROWSER_CDP_PORT: int = 9223
+    BROWSER_CDP_PORT: int = 9231
     BROWSER_START_TIMEOUT_SECONDS: float = 8.0
     BROWSER_HEADLESS_FALLBACK: bool = True
     COLLECTION_TIMEOUT_SECONDS: int = 45
