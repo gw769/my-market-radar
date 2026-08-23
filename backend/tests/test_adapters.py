@@ -44,6 +44,34 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(rows[1].item_id, "3002")
         self.assertIsNone(rows[1].original_price)
 
+    def test_parenthesized_title_number_is_not_assumed_to_be_reviews(self):
+        raw = {
+            "href": "https://shopee.com.my/Bottle-2026-i.1001.9001",
+            "title": "Bottle New Edition (2026)",
+            "text": "Bottle New Edition (2026)\nRM 4.90\n120 sold",
+            "price": "RM 4.90",
+            "sold": "120 sold",
+        }
+        row = ShopeeMalaysiaAdapter().parse_card(raw, 1)
+        self.assertIsNotNone(row)
+        self.assertEqual(row.price, 4.9)
+        self.assertIsNone(row.rating)
+        self.assertIsNone(row.review_count)
+
+    def test_explicit_review_label_is_still_parsed_without_dom_field(self):
+        raw = {
+            "href": "https://www.lazada.com.my/products/bottle-i9002-s.html",
+            "item_id": "9002",
+            "title": "Bottle 1L",
+            "text": "Bottle 1L\nRM 20.00\n4.8 rating\n1.2k reviews",
+            "price": "RM 20.00",
+        }
+        row = LazadaMalaysiaAdapter().parse_card(raw, 1)
+        self.assertIsNotNone(row)
+        self.assertEqual(row.review_count, 1200)
+        # Python parsing intentionally does not infer a rating from arbitrary card text.
+        self.assertIsNone(row.rating)
+
     def test_verification_html_is_detected(self):
         html = (FIXTURES / "verification_page.html").read_text()
         adapter = ShopeeMalaysiaAdapter()

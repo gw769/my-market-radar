@@ -6,13 +6,13 @@ After=network-online.target market-verification-browser.service
 [Service]
 Type=simple
 User=james
-WorkingDirectory=/home/james/seerfar-ai-analyzer/backend
-Environment=PYTHONPATH=/home/james/seerfar-ai-analyzer/backend
+WorkingDirectory=/home/james/my-market-radar/backend
+Environment=PYTHONPATH=/home/james/my-market-radar/backend
 Environment=DISPLAY=:1
 Environment=XAUTHORITY=/run/user/1000/gdm/Xauthority
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
-ExecStart=/home/james/seerfar-ai-analyzer/backend/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8011
+ExecStart=/home/james/my-market-radar/backend/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8011
 Restart=always
 RestartSec=3
 

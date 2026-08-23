@@ -87,6 +87,13 @@ def _safe_rating(value: Any) -> float | None:
     return rating if 0 <= rating <= 5 else None
 
 
+# A singular label such as "4.8 rating" usually describes the rating score, not a count.
+# Only plural "ratings" is accepted as a count label; reviews and Malay count labels remain valid.
+_REVIEW_PATTERNS = (
+    r"([0-9,.]+\s*[km]?)\s*(?:reviews?|ratings|ulasan|penilaian)\b",
+)
+
+
 class MarketplaceAdapter:
     platform: str
     blocked_hosts: tuple[str, ...] = ()
@@ -101,7 +108,10 @@ class MarketplaceAdapter:
     def is_verification_page(self, url: str, body_text: str = "") -> bool:
         parsed = urlparse(url)
         haystack = f"{parsed.netloc} {parsed.path} {body_text[:1600]}".lower()
-        signals = ("captcha", "verify", "verification", "punish", "robot check", "security check", "unusual traffic", "suspicious activity", "drag the slider")
+        signals = (
+            "captcha", "verify", "verification", "punish", "robot check",
+            "security check", "unusual traffic", "suspicious activity", "drag the slider",
+        )
         return any(host in parsed.netloc.lower() for host in self.blocked_hosts) or any(s in haystack for s in signals)
 
     def parse_cards(self, cards: list[dict[str, Any]], limit: int) -> list[MarketplaceListing]:
@@ -136,14 +146,15 @@ class ShopeeMalaysiaAdapter(MarketplaceAdapter):
           const image = card?.querySelector('img');
           const href = a.href;
           const id = href.match(/-i\.(\d+)\.(\d+)/);
-          const ratingNode = card?.querySelector('[aria-label*="rating" i], [class*="rating" i]');
-          const ratingText = (ratingNode?.getAttribute('aria-label') || ratingNode?.textContent || '');
+          const ratingNode = card?.querySelector('[aria-label*="rating" i], [aria-label*="star" i], [class*="rating" i]');
+          const ratingText = (ratingNode?.getAttribute('aria-label') || ratingNode?.textContent || '').trim();
+          const ratingArea = ratingNode ? (ratingNode.parentElement?.innerText || '') : '';
           const price = text.match(/RM\s*[0-9,.]+/i)?.[0] || null;
           const sold = text.match(/[0-9,.]+\s*[km]?\s*(?:sold|terjual)/i)?.[0] || null;
-          const reviews = text.match(/([0-9,.]+\s*[km]?)\s*(?:reviews?|ratings?|ulasan|penilaian)/i)?.[1]
-            || text.match(/\(([0-9,.]+\s*[km]?)\)/)?.[1] || null;
+          const reviews = ratingArea.match(/\(([0-9,.]+\s*[km]?)\)/)?.[1]
+            || text.match(/([0-9,.]+\s*[km]?)\s*(?:reviews?|ratings|ulasan|penilaian)\b/i)?.[1] || null;
           const rating = ratingText.match(/\b[0-5](?:\.[0-9])?\b/)?.[0]
-            || text.match(/\b[3-5]\.[0-9]\b/)?.[0] || null;
+            || text.match(/(?:rating|rated|bintang)\s*[:\-]?\s*([0-5](?:\.[0-9])?)/i)?.[1] || null;
           return {href, text, title: a.getAttribute('aria-label') || a.title || text.split('\n')[0],
             image: image?.currentSrc || image?.src || null, price, sold, rating, reviews,
             seller: null, location: text.split('\n').slice(-1)[0] || null,
@@ -164,7 +175,7 @@ class ShopeeMalaysiaAdapter(MarketplaceAdapter):
         if not title:
             return None
         sold_text = raw.get("sold") or _first_match((r"([0-9,.]+\s*[km]?)\s*(?:sold|terjual)",), text)
-        review_text = raw.get("reviews") or _first_match((r"([0-9,.]+\s*[km]?)\s*(?:reviews?|ratings?|ulasan|penilaian)", r"\(([0-9,.]+\s*[km]?)\)"), text)
+        review_text = raw.get("reviews") or _first_match(_REVIEW_PATTERNS, text)
         price = parse_money(raw.get("price")) if raw.get("price") else parse_money(text, require_currency=True)
         return MarketplaceListing(
             platform=self.platform,
@@ -201,16 +212,18 @@ class LazadaMalaysiaAdapter(MarketplaceAdapter):
           const image = card?.querySelector('img');
           const href = a.href;
           const itemId = card?.getAttribute('data-item-id') || href.match(/-i(\d+)-/i)?.[1] || href.match(/\/products\/[^/]*-(\d+)\.html/i)?.[1];
-          const ratingNode = card?.querySelector('[aria-label*="rating" i], [class*="rating" i]');
-          const ratingText = (ratingNode?.getAttribute('aria-label') || ratingNode?.textContent || '');
+          const ratingNode = card?.querySelector('[aria-label*="rating" i], [aria-label*="star" i], [class*="rating" i]');
+          const ratingText = (ratingNode?.getAttribute('aria-label') || ratingNode?.textContent || '').trim();
+          const ratingArea = ratingNode ? (ratingNode.parentElement?.innerText || '') : '';
           return {href, text, title: a.title || a.getAttribute('aria-label') || text.split('\n')[0],
             image: image?.currentSrc || image?.src || null,
             price: text.match(/RM\s*[0-9,.]+/i)?.[0] || null,
             original_price: Array.from(text.matchAll(/RM\s*[0-9,.]+/ig))[1]?.[0] || null,
             sold: text.match(/[0-9,.]+\s*[km]?\s*(?:sold|terjual)/i)?.[0] || null,
-            rating: ratingText.match(/\b[0-5](?:\.[0-9])?\b/)?.[0] || text.match(/\b[3-5]\.[0-9]\b/)?.[0] || null,
-            reviews: text.match(/\(([0-9,.]+\s*[km]?)\)/)?.[1]
-              || text.match(/([0-9,.]+\s*[km]?)\s*(?:reviews?|ratings?|ulasan|penilaian)/i)?.[1] || null,
+            rating: ratingText.match(/\b[0-5](?:\.[0-9])?\b/)?.[0]
+              || text.match(/(?:rating|rated|bintang)\s*[:\-]?\s*([0-5](?:\.[0-9])?)/i)?.[1] || null,
+            reviews: ratingArea.match(/\(([0-9,.]+\s*[km]?)\)/)?.[1]
+              || text.match(/([0-9,.]+\s*[km]?)\s*(?:reviews?|ratings|ulasan|penilaian)\b/i)?.[1] || null,
             seller: null, location: text.split('\n').slice(-1)[0] || null,
             sponsored: /sponsored|iklan/i.test(text), item_id: itemId || null, shop_id: null};
         })"""
@@ -234,7 +247,7 @@ class LazadaMalaysiaAdapter(MarketplaceAdapter):
         original = parse_money(raw.get("original_price"))
         discount = round((original - price) / original * 100, 1) if original and price and original > price else None
         sold_text = raw.get("sold") or _first_match((r"([0-9,.]+\s*[km]?)\s*(?:sold|terjual)",), text)
-        review_text = raw.get("reviews") or _first_match((r"\(([0-9,.]+\s*[km]?)\)", r"([0-9,.]+\s*[km]?)\s*(?:reviews?|ratings?|ulasan|penilaian)"), text)
+        review_text = raw.get("reviews") or _first_match(_REVIEW_PATTERNS, text)
         return MarketplaceListing(
             platform=self.platform,
             item_id=item_id,
