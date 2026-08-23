@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Compass, Play, RefreshCw, Sparkles } from "lucide-react";
+import { Compass, Play, RefreshCw, ScanSearch, Sparkles } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
 import type { Keyword, Run } from "@/types";
 
@@ -46,6 +46,7 @@ export default function Discovery() {
     platforms: ["shopee", "lazada"],
   });
   const [busy, setBusy] = useState(false);
+  const [busySeed, setBusySeed] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
@@ -78,15 +79,17 @@ export default function Discovery() {
       .map((score: any) => score?.metrics?.median_price)
       .filter((value: any) => typeof value === "number") as number[];
     const medianPrice = prices.length ? prices.reduce((sum, value) => sum + value, 0) / prices.length : null;
-    return { seed, keyword, latest, run, evidence, topSegment, medianPrice };
+    const deepLimit = Math.min(40, Math.max(20, defaults.results_limit || 20, keyword?.results_limit || 0));
+    const active = Boolean(latest && ACTIVE_STATUSES.has(latest.status));
+    return { seed, keyword, latest, run, evidence, topSegment, medianPrice, deepLimit, active };
   }).sort((a, b) => {
     const aGrade = GRADE_RANK[a.evidence?.grade] || 0;
     const bGrade = GRADE_RANK[b.evidence?.grade] || 0;
     if (aGrade !== bGrade) return bGrade - aGrade;
     return (b.run?.opportunity_score ?? -1) - (a.run?.opportunity_score ?? -1);
-  }), [keywords, preset]);
+  }), [defaults.results_limit, keywords, preset]);
 
-  const activeCount = rows.filter((row) => row.latest && ACTIVE_STATUSES.has(row.latest.status)).length;
+  const activeCount = rows.filter((row) => row.active).length;
   const readyCount = rows.filter((row) => row.run).length;
 
   const startDiscovery = async () => {
@@ -107,9 +110,7 @@ export default function Discovery() {
             continue;
           }
           const response = await apiPost<any>(`/keywords/${existing.id}/runs`);
-          if (response?.queued === false && !ACTIVE_STATUSES.has(response?.run?.status)) {
-            throw new Error("任务未进入队列");
-          }
+          if (response?.queued === false && !ACTIVE_STATUSES.has(response?.run?.status)) throw new Error("任务未进入队列");
           submitted += 1;
           continue;
         }
@@ -122,11 +123,9 @@ export default function Discovery() {
           daily_time: defaults.daily_time,
           timezone: defaults.timezone,
         });
-        if (response?.queued === false && !ACTIVE_STATUSES.has(response?.run?.status)) {
-          throw new Error("任务未进入队列");
-        }
+        if (response?.queued === false && !ACTIVE_STATUSES.has(response?.run?.status)) throw new Error("任务未进入队列");
         submitted += 1;
-      } catch (err) {
+      } catch {
         failed.push(seed);
       }
     }
@@ -138,6 +137,29 @@ export default function Discovery() {
     setError(failed.length ? `未提交成功：${failed.join("、")}。其他候选已继续处理，可稍后再次补提交。` : "");
     try { await load(); } catch { /* polling will retry */ }
     setBusy(false);
+  };
+
+  const deepScan = async (keyword: Keyword, seed: string, resultsLimit: number) => {
+    setBusySeed(seed);
+    setError("");
+    setMessage("");
+    try {
+      const response = await apiPost<any>(`/discovery/keywords/${keyword.id}/deep-scan`, {
+        results_limit: resultsLimit,
+      });
+      if (response?.reason === "active_run") {
+        setMessage(`${seed} 已有任务在运行，本次没有重复入队。`);
+      } else if (response?.queued) {
+        setMessage(`${seed} 已开始深度扫描：${resultsLimit} 条/平台。本次覆盖不会修改关键词长期设置。`);
+      } else {
+        setError(`${seed} 深度扫描没有进入队列，请稍后重试。`);
+      }
+      await load();
+    } catch (err: any) {
+      setError(err.message || `${seed} 深度扫描失败`);
+    } finally {
+      setBusySeed("");
+    }
   };
 
   return <div className="page-stack">
@@ -167,10 +189,10 @@ export default function Discovery() {
 
     <section className="panel">
       <div className="panel-title"><div><span>RANKED CANDIDATES</span><h3>{preset.name} · 候选机会榜</h3></div><Sparkles /></div>
-      <p className="method-note">这是第一轮快速筛选，不是利润预测。Evidence D 不应进入采购决策；排名靠前的候选建议再到“关键词分析”做完整样本扫描。新建候选默认不启用每日跟踪，避免自动发现污染长期任务。</p>
+      <p className="method-note">第一轮用快速样本筛候选；Evidence D 不进入采购判断。已有稳定结果的候选可直接“深扫”，提高本次样本上限但不修改长期跟踪配置。</p>
       <div className="table-shell">
         <table>
-          <thead><tr><th>#</th><th>候选</th><th>状态</th><th>Evidence</th><th>机会分</th><th>完整度</th><th>中位价</th><th>最高商品族</th><th>商品族可靠度</th></tr></thead>
+          <thead><tr><th>#</th><th>候选</th><th>状态</th><th>Evidence</th><th>机会分</th><th>完整度</th><th>中位价</th><th>最高商品族</th><th>商品族可靠度</th><th>操作</th></tr></thead>
           <tbody>{rows.map((row, index) => <tr key={row.seed}>
             <td><b>#{index + 1}</b></td>
             <td><strong>{row.seed}</strong></td>
@@ -181,6 +203,12 @@ export default function Discovery() {
             <td>{row.medianPrice == null ? "—" : `RM ${row.medianPrice.toFixed(2)}`}</td>
             <td>{row.topSegment?.label || "—"}</td>
             <td>{row.topSegment?.ranking_reliability == null ? "—" : `${row.topSegment.ranking_reliability}%`}</td>
+            <td>{row.keyword && row.run ? <button
+              type="button"
+              className="table-action"
+              disabled={row.active || busySeed === row.seed}
+              onClick={() => deepScan(row.keyword!, row.seed, row.deepLimit)}
+            ><ScanSearch size={14} />{busySeed === row.seed ? "提交中" : row.active ? "任务中" : `深扫 ${row.deepLimit}`}</button> : "—"}</td>
           </tr>)}</tbody>
         </table>
       </div>
