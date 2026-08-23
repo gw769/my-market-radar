@@ -1,11 +1,12 @@
 from pathlib import Path
+from urllib.parse import quote_plus
 
 from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
     APP_NAME: str = "MY Marketplace Analyzer"
-    APP_VERSION: str = "1.0.0"
+    APP_VERSION: str = "1.0.1"
     DEBUG: bool = False
     SECRET_KEY: str = "dev-secret-key-change-in-production"
 
@@ -18,6 +19,10 @@ class Settings(BaseSettings):
     MYSQL_DATABASE: str = "marketplace_ai"
 
     BROWSER_PROFILE_DIR: str = ""
+    BROWSER_EXECUTABLE: str = ""
+    BROWSER_CDP_PORT: int = 9223
+    BROWSER_START_TIMEOUT_SECONDS: float = 8.0
+    BROWSER_HEADLESS_FALLBACK: bool = True
     COLLECTION_TIMEOUT_SECONDS: int = 45
     DEFAULT_RESULTS_LIMIT: int = 20
     DEFAULT_DAILY_TIME: str = "20:00"
@@ -42,9 +47,11 @@ class Settings(BaseSettings):
 
     @property
     def DATABASE_URL(self) -> str:
-        if self.DATABASE_TYPE == "mysql":
+        if self.DATABASE_TYPE.lower() == "mysql":
+            user = quote_plus(self.MYSQL_USER)
+            password = quote_plus(self.MYSQL_PASSWORD)
             return (
-                f"mysql+pymysql://{self.MYSQL_USER}:{self.MYSQL_PASSWORD}"
+                f"mysql+pymysql://{user}:{password}"
                 f"@{self.MYSQL_HOST or 'localhost'}:{self.MYSQL_PORT}/{self.MYSQL_DATABASE}"
             )
         return f"sqlite:///{self.data_path / 'marketplace_ai.db'}"
