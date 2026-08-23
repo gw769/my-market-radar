@@ -21,14 +21,13 @@ def recover_interrupted_runs() -> int:
             .all()
         )
         for run in runs:
-            if run.status == "running":
-                run.status = "pending"
-                run.progress = 0
-                run.current_step = "服务重启后等待恢复采集"
-                run.started_at = None
-                run.completed_at = None
-                run.error_message = None
-                run.verification_platform = None
+            run.status = "pending"
+            run.progress = 0
+            run.current_step = "服务重启后等待恢复采集"
+            run.started_at = None
+            run.completed_at = None
+            run.error_message = None
+            run.verification_platform = None
             run_ids.append(run.id)
         if runs:
             db.commit()
