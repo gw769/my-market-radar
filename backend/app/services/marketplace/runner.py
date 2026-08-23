@@ -32,10 +32,45 @@ settings = get_settings()
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="marketplace-collector")
 _queue_lock = threading.Lock()
 _queued_run_ids: set[int] = set()
+_requeue_requested: set[int] = set()
 
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _request_config(keyword: TrackedKeyword) -> dict[str, Any]:
+    return {
+        "keyword": keyword.keyword,
+        "platforms": list(keyword.platforms or []),
+        "results_limit": int(keyword.results_limit),
+    }
+
+
+def _collection_request(run: AnalysisRun, keyword: TrackedKeyword) -> SimpleNamespace:
+    """Return the immutable request captured when the run was created.
+
+    Older database rows may not contain request_config, so they intentionally fall back to
+    the keyword's current settings once. New runs always persist a snapshot before queuing.
+    """
+    stored = (run.analysis or {}).get("request_config") if isinstance(run.analysis, dict) else None
+    config = stored if isinstance(stored, dict) else _request_config(keyword)
+    platforms = [str(platform) for platform in (config.get("platforms") or []) if str(platform) in ADAPTERS]
+    try:
+        results_limit = int(config.get("results_limit", keyword.results_limit))
+    except (TypeError, ValueError):
+        results_limit = int(keyword.results_limit)
+    return SimpleNamespace(
+        id=keyword.id,
+        keyword=str(config.get("keyword") or keyword.keyword),
+        platforms=platforms,
+        results_limit=results_limit,
+        request_config={
+            "keyword": str(config.get("keyword") or keyword.keyword),
+            "platforms": platforms,
+            "results_limit": results_limit,
+        },
+    )
 
 
 def create_run(db: Session, keyword: TrackedKeyword, trigger: str = "manual") -> AnalysisRun:
@@ -56,6 +91,7 @@ def create_run(db: Session, keyword: TrackedKeyword, trigger: str = "manual") ->
         status="pending",
         progress=0,
         current_step="等待采集",
+        analysis={"request_config": _request_config(keyword)},
     )
     keyword.last_run_at = _utcnow()
     db.add(run)
@@ -68,12 +104,24 @@ def _execute_queued(run_id: int) -> None:
     try:
         execute_run_sync(run_id)
     finally:
+        should_requeue = False
         with _queue_lock:
             _queued_run_ids.discard(run_id)
+            if run_id in _requeue_requested:
+                _requeue_requested.discard(run_id)
+                should_requeue = True
+        if should_requeue:
+            try:
+                # A resume request can arrive in the tiny window after the database was moved
+                # back to pending but before the finishing worker leaves _queued_run_ids. Queue
+                # it now that the old worker is definitely gone.
+                submit_run(run_id)
+            except Exception:
+                logger.error("延迟重新入队失败 run=%s", run_id, exc_info=True)
 
 
 def submit_run(run_id: int) -> bool:
-    """Queue a pending run exactly once within this process."""
+    """Queue a pending run exactly once without losing a concurrent resume request."""
     db = SessionLocal()
     try:
         run = db.query(AnalysisRun).filter(AnalysisRun.id == run_id).first()
@@ -84,7 +132,12 @@ def submit_run(run_id: int) -> bool:
 
     with _queue_lock:
         if run_id in _queued_run_ids:
-            return False
+            # Treat this as accepted, not rejected. If the existing worker is only finishing a
+            # previous attempt, _execute_queued will enqueue the now-pending run immediately
+            # after removing the old queue marker. If it is still a normal pending duplicate,
+            # the later submit simply sees a terminal status and becomes a no-op.
+            _requeue_requested.add(run_id)
+            return True
         _queued_run_ids.add(run_id)
     try:
         _executor.submit(_execute_queued, run_id)
@@ -92,6 +145,7 @@ def submit_run(run_id: int) -> bool:
     except Exception:
         with _queue_lock:
             _queued_run_ids.discard(run_id)
+            _requeue_requested.discard(run_id)
         raise
 
 
@@ -181,7 +235,8 @@ async def _collect_resident_tab(adapter: Any, keyword: str, limit: int) -> tuple
         request_id += 1
         await _cdp_call(socket, request_id, "Page.navigate", {"url": url})
 
-        deadline = time.monotonic() + min(float(settings.COLLECTION_TIMEOUT_SECONDS), 24.0)
+        collection_window = max(5.0, min(float(settings.COLLECTION_TIMEOUT_SECONDS), 120.0))
+        deadline = time.monotonic() + collection_window
         previous_count = -1
         stable_rounds = 0
         while time.monotonic() < deadline:
@@ -212,7 +267,7 @@ async def _collect_resident_tab(adapter: Any, keyword: str, limit: int) -> tuple
             if usable_count >= limit:
                 break
             stable_rounds = stable_rounds + 1 if usable_count > 0 and usable_count == previous_count else 0
-            if stable_rounds >= 2 and usable_count >= min(6, limit):
+            if stable_rounds >= 3 and usable_count >= min(6, limit):
                 break
             previous_count = usable_count
 
@@ -310,19 +365,17 @@ def execute_run_sync(run_id: int) -> None:
         keyword = db.query(TrackedKeyword).filter(TrackedKeyword.id == run.keyword_id).first()
         if not keyword:
             return
+        collection_request = _collection_request(run, keyword)
         run.status = "running"
         run.progress = 5
         run.current_step = "准备项目 Chrome"
         run.started_at = _utcnow()
+        run.completed_at = None
         run.error_message = None
         run.verification_platform = None
+        # Persist the normalized request snapshot for legacy rows before starting collection.
+        run.analysis = {**(run.analysis or {}), "request_config": collection_request.request_config}
         db.commit()
-        collection_request = SimpleNamespace(
-            id=keyword.id,
-            keyword=keyword.keyword,
-            platforms=list(keyword.platforms or []),
-            results_limit=keyword.results_limit,
-        )
     finally:
         db.close()
 
@@ -349,19 +402,33 @@ def execute_run_sync(run_id: int) -> None:
         run.progress = 75
         run.current_step = "计算公开数据机会分"
         by_platform = {platform: [listing.to_dict() for listing in listings] for platform, listings in collected.items()}
-        analysis = build_analysis(keyword.keyword, by_platform)
+        analysis = build_analysis(collection_request.keyword, by_platform)
         counts = {platform: len(items) for platform, items in collected.items()}
-        expected = set(keyword.platforms or [])
+        expected = set(collection_request.platforms)
         successful = {platform for platform, items in collected.items() if items}
-        run.status = "completed" if expected == successful else "partial"
+        if not successful:
+            run.status = "failed"
+            run.current_step = "未采集到有效商品"
+        elif expected == successful:
+            run.status = "completed"
+            run.current_step = "分析完成"
+        else:
+            run.status = "partial"
+            run.current_step = "部分平台无结果"
         run.progress = 100
-        run.current_step = "分析完成" if run.status == "completed" else "部分平台无结果"
         run.opportunity_score = analysis["opportunity_score"]
         run.verdict = analysis["verdict"]
         run.confidence = analysis["confidence"]
         run.platform_scores = analysis["platform_scores"]
-        run.analysis = {**analysis, "counts": counts, "platform_errors": collection_errors}
+        run.analysis = {
+            **analysis,
+            "request_config": collection_request.request_config,
+            "counts": counts,
+            "platform_errors": collection_errors,
+        }
         run.error_message = "；".join(f"{name.title()}: {message}" for name, message in collection_errors.items()) if collection_errors else None
+        if run.status == "failed" and not run.error_message:
+            run.error_message = "所选平台没有返回可用于分析的公开商品"
         run.completed_at = _utcnow()
         keyword.last_run_at = _utcnow()
         if successful:
