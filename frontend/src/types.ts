@@ -14,6 +14,12 @@ export interface PlatformScore {
   dimensions: { demand: number | null; entry_ease: number | null; price_room: number | null };
   metrics: Record<string, number | null>;
 }
+export interface OpportunitySegment {
+  label: string; token?: string | null; opportunity_score: number; verdict: string;
+  confidence: number; sample_size: number; share: number; platform_coverage: number;
+  median_price?: number | null; seller_concentration?: number | null;
+  representative_titles: string[]; platform_scores: Record<string, PlatformScore>;
+}
 export interface Keyword {
   id: number; keyword: string; platforms: string[]; results_limit: number;
   tracking_enabled: boolean; daily_time: string; timezone: string;
