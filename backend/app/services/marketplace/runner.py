@@ -3,15 +3,17 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 import threading
 import time
+import unicodedata
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, parse_qsl, unquote, urlparse
 
 from sqlalchemy import case
 from sqlalchemy.orm import Session
@@ -438,6 +440,148 @@ def _normalized_query_value(parsed: Any, name: str) -> str:
     return " ".join(str(values[0] if values else "").split()).casefold()
 
 
+def _unique_query_value(parsed: Any, name: str) -> str | None:
+    values = [
+        value
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key.casefold() == name.casefold()
+    ]
+    if len(values) != 1:
+        return None
+    return " ".join(str(values[0]).split()).casefold()
+
+
+def _unique_page_number(parsed: Any, default: int) -> int | None:
+    values = [
+        value
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key.casefold() == "page"
+    ]
+    if len(values) > 1:
+        return None
+    if not values:
+        return default
+    value = str(values[0]).strip()
+    if not re.fullmatch(r"[0-9]+", value):
+        return None
+    page = int(value)
+    return page if page >= 1 else None
+
+
+def _slug_tokens(value: str) -> tuple[str, ...]:
+    normalized = unicodedata.normalize("NFKD", value).casefold()
+    normalized = "".join(
+        char for char in normalized if not unicodedata.combining(char)
+    )
+    return tuple(re.findall(r"[^\W_]+", normalized, flags=re.UNICODE))
+
+
+def _same_safe_lazada_origin(expected: Any, actual: Any) -> bool:
+    if expected.scheme.casefold() != "https" or actual.scheme.casefold() != "https":
+        return False
+    if any(
+        value is not None
+        for value in (
+            expected.username,
+            expected.password,
+            actual.username,
+            actual.password,
+        )
+    ):
+        return False
+    expected_host = (expected.hostname or "").casefold()
+    actual_host = (actual.hostname or "").casefold()
+    if not expected_host or actual_host != expected_host:
+        return False
+    try:
+        expected_port = expected.port or 443
+        actual_port = actual.port or 443
+    except ValueError:
+        return False
+    return expected_port == 443 and actual_port == expected_port
+
+
+def _strict_tag_slug(raw_slug: str) -> str | None:
+    if not raw_slug or "/" in raw_slug or "\\" in raw_slug:
+        return None
+    if re.search(r"%(?![0-9a-fA-F]{2})", raw_slug):
+        return None
+    try:
+        decoded = unquote(raw_slug, encoding="utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return None
+    if not decoded or "\ufffd" in decoded:
+        return None
+    normalized_forms = (
+        decoded,
+        unicodedata.normalize("NFKC", decoded),
+        unicodedata.normalize("NFKD", decoded),
+    )
+    for normalized in normalized_forms:
+        for char in normalized:
+            if char in "/\\?#" or unicodedata.category(char).startswith("C"):
+                return None
+            unicode_name = unicodedata.name(char, "")
+            if "SLASH" in unicode_name or "SOLIDUS" in unicode_name:
+                return None
+    return normalized_forms[1]
+
+
+_RESERVED_LAZADA_TAG_SLUGS = {
+    "404",
+    "404-error",
+    "access-denied",
+    "captcha",
+    "challenge",
+    "error",
+    "errors",
+    "forbidden",
+    "not-found",
+    "notfound",
+    "punish",
+    "robot-check",
+    "security",
+    "security-check",
+    "verification",
+    "verify",
+}
+
+
+def _lazada_tag_redirect_matches(adapter: Any, expected: Any, actual: Any, actual_url: str) -> bool:
+    if not _same_safe_lazada_origin(expected, actual):
+        return False
+    if expected.path.rstrip("/").casefold() != "/catalog":
+        return False
+    raw_path = actual.path.rstrip("/")
+    if not raw_path.casefold().startswith("/tag/"):
+        return False
+    raw_slug = raw_path[len("/tag/"):]
+    decoded_slug = _strict_tag_slug(raw_slug)
+    if decoded_slug is None:
+        return False
+
+    slug_tokens = _slug_tokens(decoded_slug)
+    slug_key = "-".join(slug_tokens)
+    if not slug_tokens or slug_key in _RESERVED_LAZADA_TAG_SLUGS:
+        return False
+    if adapter.is_verification_page(actual_url, ""):
+        return False
+
+    expected_query = _unique_query_value(expected, "q")
+    actual_query = _unique_query_value(actual, "q")
+    if not expected_query or actual_query != expected_query:
+        return False
+    if slug_tokens != _slug_tokens(expected_query):
+        return False
+
+    marker = _unique_query_value(actual, "catalog_redirect_tag")
+    if marker != "true":
+        return False
+    expected_page = _unique_page_number(expected, 1)
+    actual_page = _unique_page_number(actual, 1)
+    return expected_page is not None and actual_page == expected_page
+
+
 def _search_page_url_matches(adapter: Any, expected_url: str, actual_url: str) -> bool:
     """Confirm the attached tab reached the requested marketplace result page."""
     try:
@@ -445,12 +589,40 @@ def _search_page_url_matches(adapter: Any, expected_url: str, actual_url: str) -
         actual = urlparse(actual_url)
     except ValueError:
         return False
-    expected_host = (expected.hostname or "").lower().removeprefix("www.")
-    actual_host = (actual.hostname or "").lower().removeprefix("www.")
-    if not expected_host or actual_host != expected_host:
-        return False
-    if actual.path.rstrip("/").lower() != expected.path.rstrip("/").lower():
-        return False
+    if adapter.platform == "lazada":
+        if not _same_safe_lazada_origin(expected, actual):
+            return False
+    else:
+        expected_host = (expected.hostname or "").lower().removeprefix("www.")
+        actual_host = (actual.hostname or "").lower().removeprefix("www.")
+        if not expected_host or actual_host != expected_host:
+            return False
+    expected_path = expected.path.rstrip("/").lower()
+    actual_path = actual.path.rstrip("/").lower()
+    exact_path = actual_path == expected_path
+    if not exact_path:
+        return adapter.platform == "lazada" and _lazada_tag_redirect_matches(
+            adapter,
+            expected,
+            actual,
+            actual_url,
+        )
+
+    if adapter.platform == "lazada":
+        expected_query = _unique_query_value(expected, "q")
+        actual_query = _unique_query_value(actual, "q")
+        if not expected_query or actual_query != expected_query:
+            return False
+        expected_page = _unique_page_number(expected, 1)
+        actual_page = _unique_page_number(actual, 1)
+        if expected_page is None or actual_page != expected_page:
+            return False
+        redirect_markers = [
+            value
+            for key, value in parse_qsl(actual.query, keep_blank_values=True)
+            if key.casefold() == "catalog_redirect_tag"
+        ]
+        return len(redirect_markers) <= 1
 
     query_name = "keyword" if adapter.platform == "shopee" else "q"
     if _normalized_query_value(actual, query_name) != _normalized_query_value(expected, query_name):
