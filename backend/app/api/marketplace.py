@@ -78,29 +78,34 @@ def _owned_run(db: Session, user_id: int, run_id: int) -> AnalysisRun:
     return run
 
 
+def _apply_keyword_settings(keyword: TrackedKeyword, payload: KeywordCreate) -> None:
+    keyword.platforms = payload.platforms
+    keyword.results_limit = payload.results_limit
+    keyword.tracking_enabled = payload.tracking_enabled
+    keyword.daily_time = payload.daily_time
+    keyword.timezone = payload.timezone
+    keyword.next_run_at = next_run_utc(payload.daily_time, payload.timezone) if payload.tracking_enabled else None
+
+
 @router.post("/keywords")
 def add_keyword(payload: KeywordCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     existing = db.query(TrackedKeyword).filter(func.lower(TrackedKeyword.keyword) == payload.keyword.lower(), TrackedKeyword.user_id == current_user.id).first()
     if existing:
+        _apply_keyword_settings(existing, payload)
+        db.commit()
+        db.refresh(existing)
         run = create_run(db, existing, trigger="manual")
-        submit_run(run.id)
-        return {"success": True, "keyword": _keyword_payload(existing, run), "run": _run_payload(run)}
-    keyword = TrackedKeyword(
-        user_id=current_user.id,
-        keyword=payload.keyword,
-        platforms=payload.platforms,
-        results_limit=payload.results_limit,
-        tracking_enabled=payload.tracking_enabled,
-        daily_time=payload.daily_time,
-        timezone=payload.timezone,
-        next_run_at=next_run_utc(payload.daily_time, payload.timezone),
-    )
+        queued = submit_run(run.id)
+        return {"success": True, "queued": queued, "keyword": _keyword_payload(existing, run), "run": _run_payload(run)}
+
+    keyword = TrackedKeyword(user_id=current_user.id, keyword=payload.keyword)
+    _apply_keyword_settings(keyword, payload)
     db.add(keyword)
     db.commit()
     db.refresh(keyword)
     run = create_run(db, keyword, trigger="manual")
-    submit_run(run.id)
-    return {"success": True, "keyword": _keyword_payload(keyword, run), "run": _run_payload(run)}
+    queued = submit_run(run.id)
+    return {"success": True, "queued": queued, "keyword": _keyword_payload(keyword, run), "run": _run_payload(run)}
 
 
 @router.get("/keywords")
@@ -137,8 +142,8 @@ def delete_keyword(keyword_id: int, db: Session = Depends(get_db), current_user:
 def run_keyword(keyword_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     keyword = _owned_keyword(db, current_user.id, keyword_id)
     run = create_run(db, keyword, trigger="manual")
-    submit_run(run.id)
-    return {"success": True, "run": _run_payload(run)}
+    queued = submit_run(run.id)
+    return {"success": True, "queued": queued, "run": _run_payload(run)}
 
 
 @router.get("/runs/{run_id}")
@@ -169,7 +174,11 @@ def verification_browser(run_id: int, db: Session = Depends(get_db), current_use
     run = _owned_run(db, current_user.id, run_id)
     if run.status != "needs_verification":
         raise HTTPException(status_code=409, detail="当前任务不需要人工验证")
-    return {"success": True, "url": open_verification_browser(run.id), "message": "完成验证后保持浏览器窗口打开，再点击继续采集。"}
+    try:
+        url = open_verification_browser(run.id)
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"success": True, "url": url, "message": "完成验证后保持项目 Chrome 窗口打开，再点击继续采集。"}
 
 
 @router.post("/runs/{run_id}/resume")
@@ -183,8 +192,8 @@ def resume_run(run_id: int, db: Session = Depends(get_db), current_user: User = 
     run.error_message = None
     run.verification_platform = None
     db.commit()
-    submit_run(run.id)
-    return {"success": True, "run": _run_payload(run)}
+    queued = submit_run(run.id)
+    return {"success": True, "queued": queued, "run": _run_payload(run)}
 
 
 @router.get("/runs/{run_id}/report.xlsx")
