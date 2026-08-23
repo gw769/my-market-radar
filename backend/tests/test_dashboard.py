@@ -1,6 +1,6 @@
 import unittest
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -69,13 +69,37 @@ class DashboardTests(unittest.TestCase):
         db.commit()
         db.refresh(user)
 
-        data = dashboard(db=db, current_user=user)["data"]
+        statements: list[str] = []
+
+        def capture_statement(
+            _conn, _cursor, statement, _parameters, _context, _executemany,
+        ):
+            statements.append(statement)
+
+        event.listen(self.engine, "before_cursor_execute", capture_statement)
+        try:
+            data = dashboard(db=db, current_user=user)["data"]
+        finally:
+            event.remove(self.engine, "before_cursor_execute", capture_statement)
+
+        self.assertEqual(len(statements), 6)
         self.assertEqual(data["needs_verification"], 1)
         self.assertEqual(data["completed_runs"], 2)
         self.assertEqual(data["platform_counts"], {"shopee": 1})
         self.assertLessEqual(len(data["latest_runs"]), 8)
         self.assertLessEqual(len(data["score_history"]), 30)
         self.assertNotIn(99, [point["score"] for point in data["score_history"]])
+        self.assertTrue(data["latest_runs"])
+        latest_payload = data["latest_runs"][0]
+        self.assertEqual(latest_payload["keyword"], "bottle")
+        self.assertNotIn("platform_scores", latest_payload)
+        self.assertNotIn("trigger", latest_payload)
+        self.assertEqual(
+            set(latest_payload["analysis"]),
+            {
+                "platform_errors", "counts", "evidence", "top_segment", "median_price",
+            },
+        )
         db.close()
 
 

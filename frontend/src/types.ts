@@ -1,10 +1,16 @@
-export interface Run {
-  id: number; keyword_id: number; keyword: string; trigger: string;
+export interface RunSummary {
+  id: number; keyword_id: number; keyword?: string | null; trigger?: string;
   status: "pending" | "running" | "completed" | "partial" | "needs_verification" | "failed";
-  progress: number; current_step?: string; verification_platform?: string;
-  opportunity_score?: number | null; verdict?: string; confidence?: number;
-  platform_scores: Record<string, PlatformScore>; analysis: any; error_message?: string;
-  created_at?: string; started_at?: string; completed_at?: string;
+  progress: number; current_step?: string | null; verification_platform?: string | null;
+  opportunity_score?: number | null; verdict?: string | null; confidence?: number | null;
+  platform_scores?: Record<string, PlatformScore>; analysis?: any; error_message?: string | null;
+  created_at?: string | null; started_at?: string | null; completed_at?: string | null;
+}
+export interface Run extends RunSummary {
+  keyword: string;
+  trigger: string;
+  platform_scores: Record<string, PlatformScore>;
+  analysis: any;
 }
 export interface PlatformScore {
   score: number | null; verdict: string; eligible?: boolean; confidence: number; sample_size: number;
@@ -25,7 +31,7 @@ export interface Keyword {
   id: number; keyword: string; marketplace_query?: string; platforms: string[]; results_limit: number; search_pages?: number;
   tracking_enabled: boolean; daily_time: string; timezone: string;
   last_run_at?: string; last_success_at?: string; next_run_at?: string;
-  latest_run?: Run | null; latest_result_run?: Run | null;
+  latest_run?: RunSummary | null; latest_result_run?: RunSummary | null;
 }
 export interface Listing {
   id: number; platform: string; item_id: string; title: string; product_url: string; image_url?: string;

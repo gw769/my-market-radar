@@ -73,8 +73,8 @@ async function parseResponse<T>(res: Response): Promise<T> {
   return res.json();
 }
 
-export async function apiGet<T = any>(url: string): Promise<T> {
-  return parseResponse<T>(await fetch(`${BASE}${url}`, { headers: headers() }));
+export async function apiGet<T = any>(url: string, options: { signal?: AbortSignal } = {}): Promise<T> {
+  return parseResponse<T>(await fetch(`${BASE}${url}`, { headers: headers(), signal: options.signal }));
 }
 
 export async function apiPatch<T = any>(url: string, body: any): Promise<T> {

@@ -117,6 +117,51 @@ class AdapterTests(unittest.TestCase):
                 self.assertIn("sponsored: /sponsored|iklan|广告|廣告/i.test(text)", script)
                 self.assertIn("ad|advertisement|广告|廣告", script)
 
+    def test_image_extraction_prefers_web_candidates_and_parse_drops_inline_placeholders(self):
+        cases = (
+            (
+                ShopeeMalaysiaAdapter(),
+                "https://shopee.com.my/Nail-Sticker-i.1001.9901",
+                {"shop_id": "1001", "item_id": "9901"},
+            ),
+            (
+                LazadaMalaysiaAdapter(),
+                "https://www.lazada.com.my/products/nail-sticker-i9902-s.html",
+                {"item_id": "9902"},
+            ),
+        )
+        for adapter, href, identifiers in cases:
+            with self.subTest(platform=adapter.platform):
+                script = adapter.extraction_script
+                self.assertIn("image?.getAttribute('data-src')", script)
+                self.assertIn("image?.getAttribute('data-original')", script)
+                self.assertIn("image?.getAttribute('data-srcset')", script)
+                self.assertIn("new URL(value, location.href)", script)
+                self.assertIn("image: imageUrl", script)
+
+                base = {
+                    "href": href,
+                    "title": "Nail Sticker",
+                    "text": "Nail Sticker\nRM 9.90",
+                    "price": "RM 9.90",
+                    **identifiers,
+                }
+                for invalid in (
+                    "data:image/png;base64,AAAA",
+                    "blob:https://example.test/placeholder",
+                    "javascript:alert(1)",
+                    "/relative/image.jpg",
+                ):
+                    row = adapter.parse_card({**base, "image": invalid}, 1)
+                    self.assertIsNotNone(row)
+                    self.assertIsNone(row.image_url)
+                    self.assertIsNone(row.raw_data["image"])
+
+                valid = "https://img.example.test/product.jpg"
+                row = adapter.parse_card({**base, "image": valid}, 1)
+                self.assertEqual(row.image_url, valid)
+                self.assertEqual(row.raw_data["image"], valid)
+
     def test_variant_price_range_is_not_scored_as_minimum_price(self):
         shopee = ShopeeMalaysiaAdapter().parse_card({
             "href": "https://shopee.com.my/Bottle-i.1001.9200",

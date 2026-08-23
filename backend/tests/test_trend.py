@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime, timedelta
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -210,6 +210,64 @@ class TrendEvidenceTests(unittest.TestCase):
         self.assertEqual(trend["overall"]["matched_items"], 6)
         self.assertEqual(trend["overall"]["activity_share"], 100.0)
         self.assertEqual(trend["overall"]["median_sold_delta"], 10.0)
+        db.close()
+
+    def test_snapshot_queries_project_only_trend_fields(self):
+        db = self.Session()
+        previous = AnalysisRun(
+            keyword_id=self.keyword_id,
+            status="completed",
+            completed_at=datetime(2026, 8, 22, 12, 0, 0),
+        )
+        current = AnalysisRun(
+            keyword_id=self.keyword_id,
+            status="completed",
+            completed_at=datetime(2026, 8, 23, 12, 0, 0),
+        )
+        db.add_all([previous, current])
+        db.flush()
+        for run, sold in ((previous, 100), (current, 110)):
+            snapshot = ListingSnapshot(
+                run_id=run.id,
+                keyword_id=self.keyword_id,
+                platform="shopee",
+                item_id="projected-item",
+                title="Water Bottle",
+                product_url="https://example.test/a-very-long-product-url",
+                image_url="data:image/png;base64," + ("A" * 5000),
+                price=20.0,
+                sold_count=sold,
+                review_count=10,
+                search_rank=1,
+                raw_data={"payload": "x" * 5000},
+            )
+            db.add(snapshot)
+        db.commit()
+
+        snapshot_selects: list[str] = []
+
+        def capture_snapshot_select(
+            _conn, _cursor, statement, _parameters, _context, _executemany,
+        ):
+            normalized = statement.casefold()
+            if normalized.lstrip().startswith("select") and "from listing_snapshots" in normalized:
+                snapshot_selects.append(normalized)
+
+        event.listen(self.engine, "before_cursor_execute", capture_snapshot_select)
+        try:
+            trend = build_keyword_trend(db, self.keyword_id)
+        finally:
+            event.remove(self.engine, "before_cursor_execute", capture_snapshot_select)
+
+        self.assertEqual(trend["overall"]["median_sold_delta"], 10.0)
+        self.assertEqual(len(snapshot_selects), 2)
+        for statement in snapshot_selects:
+            self.assertNotIn("raw_data", statement)
+            self.assertNotIn("image_url", statement)
+            self.assertNotIn("product_url", statement)
+            self.assertNotIn("seller_name", statement)
+            self.assertIn("listing_snapshots.title", statement)
+            self.assertIn("listing_snapshots.sold_count", statement)
         db.close()
 
 

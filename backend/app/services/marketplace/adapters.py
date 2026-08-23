@@ -109,8 +109,32 @@ def _first_match(patterns: Iterable[str], text: str, flags: int = re.I) -> str |
 
 def _quality(raw: dict[str, Any]) -> float:
     core = [raw.get("title"), raw.get("href"), raw.get("price")]
-    detail = [raw.get("sold"), raw.get("rating"), raw.get("reviews"), raw.get("image")]
+    detail = [
+        raw.get("sold"),
+        raw.get("rating"),
+        raw.get("reviews"),
+        _safe_image_url(raw.get("image")),
+    ]
     return round((sum(v not in (None, "") for v in core) * 0.2) + (sum(v not in (None, "") for v in detail) * 0.1), 2)
+
+
+def _safe_image_url(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    try:
+        parsed = urlparse(text)
+    except ValueError:
+        return None
+    if parsed.scheme.casefold() not in {"http", "https"} or not parsed.netloc:
+        return None
+    return text
+
+
+def _sanitized_raw_data(raw: dict[str, Any]) -> dict[str, Any]:
+    sanitized = dict(raw)
+    sanitized["image"] = _safe_image_url(raw.get("image"))
+    return sanitized
 
 
 def _safe_rating(value: Any) -> float | None:
@@ -225,6 +249,23 @@ class ShopeeMalaysiaAdapter(MarketplaceAdapter):
           const text = (card?.innerText || a.innerText || '').trim();
           const lines = text.split('\n').map(x => x.trim()).filter(Boolean);
           const image = card?.querySelector('img');
+          const imageCandidates = [
+            image?.currentSrc,
+            image?.getAttribute('data-src'),
+            image?.getAttribute('data-original'),
+            image?.getAttribute('data-lazy-src'),
+            image?.src,
+            ...[image?.getAttribute('srcset'), image?.getAttribute('data-srcset')]
+              .flatMap(value => String(value || '').split(',').map(part => part.trim().split(/\s+/)[0])),
+          ];
+          const imageUrl = imageCandidates.map(value => {
+            try {
+              const parsed = new URL(value, location.href);
+              return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.href : null;
+            } catch (_) {
+              return null;
+            }
+          }).find(Boolean) || null;
           const href = a.href;
           const id = href.match(/-i\.(\d+)\.(\d+)/);
           const title = a.getAttribute('aria-label') || a.title || lines[0] || '';
@@ -249,7 +290,7 @@ class ShopeeMalaysiaAdapter(MarketplaceAdapter):
             && !/^\([0-9,.]+\s*[km千萬万亿億]?\s*\+?\)$/.test(line)
             && !/^[0-5](?:\.[0-9])?$/.test(line)) || null;
           return {href, text, title,
-            image: image?.currentSrc || image?.src || null, price, sold, rating, reviews,
+            image: imageUrl, price, sold, rating, reviews,
             seller: null, location,
             sponsored: /sponsored|iklan|广告|廣告/i.test(text), shop_id: id?.[1] || null,
             item_id: id?.[2] || null, page_position: pageIndex + 1, page_size: pageSize};
@@ -277,13 +318,14 @@ class ShopeeMalaysiaAdapter(MarketplaceAdapter):
         price = None if parse_money_range(text) else (
             parse_money(raw.get("price")) if raw.get("price") else parse_money(text, require_currency=True)
         )
+        image_url = _safe_image_url(raw.get("image"))
         return MarketplaceListing(
             platform=self.platform,
             item_id=item_id,
             shop_id=str(raw.get("shop_id") or (id_match.group(1) if id_match else "")) or None,
             title=title[:1000],
             product_url=href.split("?")[0],
-            image_url=raw.get("image"),
+            image_url=image_url,
             price=price,
             sold_count=parse_compact_count(sold_text),
             rating=_safe_rating(raw.get("rating")),
@@ -293,7 +335,7 @@ class ShopeeMalaysiaAdapter(MarketplaceAdapter):
             is_sponsored=bool(raw.get("sponsored")) if raw.get("sponsored") is not None else None,
             search_rank=rank,
             data_quality=_quality(raw),
-            raw_data=raw,
+            raw_data=_sanitized_raw_data(raw),
         )
 
 
@@ -326,6 +368,23 @@ class LazadaMalaysiaAdapter(MarketplaceAdapter):
           const text = (card?.innerText || a.innerText || '').trim();
           const lines = text.split('\n').map(x => x.trim()).filter(Boolean);
           const image = card?.querySelector('img');
+          const imageCandidates = [
+            image?.currentSrc,
+            image?.getAttribute('data-src'),
+            image?.getAttribute('data-original'),
+            image?.getAttribute('data-lazy-src'),
+            image?.src,
+            ...[image?.getAttribute('srcset'), image?.getAttribute('data-srcset')]
+              .flatMap(value => String(value || '').split(',').map(part => part.trim().split(/\s+/)[0])),
+          ];
+          const imageUrl = imageCandidates.map(value => {
+            try {
+              const parsed = new URL(value, location.href);
+              return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.href : null;
+            } catch (_) {
+              return null;
+            }
+          }).find(Boolean) || null;
           const href = a.href;
           const itemId = card?.getAttribute('data-item-id') || href.match(/-i(\d+)-/i)?.[1] || href.match(/\/products\/[^/]*-(\d+)\.html/i)?.[1];
           const title = a.title || a.getAttribute('aria-label') || lines[0] || '';
@@ -345,7 +404,7 @@ class LazadaMalaysiaAdapter(MarketplaceAdapter):
             && !/^\([0-9,.]+\s*[km千萬万亿億]?\s*\+?\)$/.test(line)
             && !/^[0-5](?:\.[0-9])?$/.test(line)) || null;
           return {href, text, title,
-            image: image?.currentSrc || image?.src || null,
+            image: imageUrl,
             price: prices[0]?.[0] || null,
             original_price: prices[1]?.[0] || null,
             sold: text.match(/[0-9,.]+\s*[km]?\s*\+?\s*(?:sold|terjual)\b/i)?.[0]
@@ -387,13 +446,14 @@ class LazadaMalaysiaAdapter(MarketplaceAdapter):
         discount = round((original - price) / original * 100, 1) if original and price and original > price else None
         sold_text = raw.get("sold") or _first_match(_SOLD_PATTERNS, text)
         review_text = raw.get("reviews") or _first_match(_REVIEW_PATTERNS, text)
+        image_url = _safe_image_url(raw.get("image"))
         return MarketplaceListing(
             platform=self.platform,
             item_id=item_id,
             shop_id=str(raw.get("shop_id") or "") or None,
             title=title[:1000],
             product_url=href.split("?")[0],
-            image_url=raw.get("image"),
+            image_url=image_url,
             price=price,
             original_price=original,
             discount_percent=discount,
@@ -405,7 +465,7 @@ class LazadaMalaysiaAdapter(MarketplaceAdapter):
             is_sponsored=bool(raw.get("sponsored")) if raw.get("sponsored") is not None else None,
             search_rank=rank,
             data_quality=_quality(raw),
-            raw_data=raw,
+            raw_data=_sanitized_raw_data(raw),
         )
 
 

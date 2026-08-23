@@ -1,52 +1,119 @@
-import { useCallback, useEffect, useState } from "react";
-import { Activity, AlertCircle, ArrowRight, CheckCircle2, Gauge, Sparkles } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Activity, AlertCircle, ArrowRight, CheckCircle2, Gauge, LoaderCircle, RefreshCw, Sparkles } from "lucide-react";
 import { apiGet } from "@/lib/api";
-import type { Keyword, OpportunitySegment, PlatformScore } from "@/types";
+import { useKeywordSummaries } from "@/hooks/useKeywordSummaries";
+import type { OpportunitySegment, PlatformScore, Run } from "@/types";
 
 const dimLabels: Record<string,string> = { demand: "需求信号", entry_ease: "进入可行性", price_room: "价格空间" };
 const RESULT_STATUSES = new Set(["completed", "partial"]);
 
 export default function AIAnalysis() {
-  const [keywords, setKeywords] = useState<Keyword[]>([]);
+  const { keywords, loading: keywordsLoading, error: keywordsError, refresh } = useKeywordSummaries();
   const [keywordId, setKeywordId] = useState(0);
+  const [run, setRun] = useState<Run | null>(null);
   const [trend, setTrend] = useState<any>(null);
-  const load = useCallback(() => apiGet<any>("/keywords").then((r) => {
-    const rows = r.data || [];
-    setKeywords(rows);
-    setKeywordId((current) => current || rows[0]?.id || 0);
-  }), []);
+  const [runLoading, setRunLoading] = useState(false);
+  const [runError, setRunError] = useState("");
+  const [loadedRunId, setLoadedRunId] = useState<number | null>(null);
+  const [runReloadKey, setRunReloadKey] = useState(0);
+  const [trendLoading, setTrendLoading] = useState(false);
+  const [trendError, setTrendError] = useState("");
+  const [loadedTrendKey, setLoadedTrendKey] = useState("");
+  const [trendReloadKey, setTrendReloadKey] = useState(0);
 
   useEffect(() => {
-    load();
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") load();
-    }, 3000);
-    return () => window.clearInterval(timer);
-  }, [load]);
+    setKeywordId((current) => keywords.some((keyword) => keyword.id === current) ? current : (keywords[0]?.id || 0));
+  }, [keywords]);
 
   const item = keywords.find((x) => x.id === keywordId);
   const latestRun = item?.latest_run;
-  const run = latestRun && RESULT_STATUSES.has(latestRun.status)
-    ? latestRun
-    : item?.latest_result_run;
+  const stableRunId = latestRun && RESULT_STATUSES.has(latestRun.status)
+    ? latestRun.id
+    : item?.latest_result_run?.id;
+  const trendRequestKey = keywordId && stableRunId ? `${keywordId}:${stableRunId}` : "";
 
   useEffect(() => {
-    if (!keywordId) {
-      setTrend(null);
+    if (!stableRunId) {
+      setRun(null);
+      setLoadedRunId(null);
+      setRunLoading(false);
+      setRunError("");
       return;
     }
-    let cancelled = false;
-    apiGet<any>(`/trends/keywords/${keywordId}`)
-      .then((response) => { if (!cancelled) setTrend(response.data || null); })
-      .catch(() => { if (!cancelled) setTrend(null); });
-    return () => { cancelled = true; };
-  }, [keywordId, run?.id]);
+
+    const controller = new AbortController();
+    setRun(null);
+    setRunLoading(true);
+    setRunError("");
+    apiGet<any>(`/runs/${stableRunId}`, { signal: controller.signal })
+      .then((runResponse) => {
+        setRun(runResponse.data || null);
+        setLoadedRunId(stableRunId);
+      })
+      .catch((reason: unknown) => {
+        if (reason instanceof Error && reason.name === "AbortError") return;
+        setLoadedRunId(stableRunId);
+        setRunError(reason instanceof Error ? reason.message : "分析详情加载失败");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setRunLoading(false);
+      });
+    return () => controller.abort();
+  }, [stableRunId, runReloadKey]);
+
+  useEffect(() => {
+    if (!keywordId || !stableRunId || !trendRequestKey) {
+      setTrend(null);
+      setLoadedTrendKey("");
+      setTrendLoading(false);
+      setTrendError("");
+      return;
+    }
+
+    const controller = new AbortController();
+    setTrend(null);
+    setTrendLoading(true);
+    setTrendError("");
+    apiGet<any>(`/trends/keywords/${keywordId}`, { signal: controller.signal })
+      .then((trendResponse) => {
+        setTrend(trendResponse.data || null);
+        setLoadedTrendKey(trendRequestKey);
+      })
+      .catch((reason: unknown) => {
+        if (reason instanceof Error && reason.name === "AbortError") return;
+        setLoadedTrendKey(trendRequestKey);
+        setTrendError(reason instanceof Error ? reason.message : "近期趋势加载失败");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setTrendLoading(false);
+      });
+    return () => controller.abort();
+  }, [keywordId, stableRunId, trendRequestKey, trendReloadKey]);
 
   const analysis = run?.analysis || {};
   const segments = (analysis.opportunity_segments || []) as OpportunitySegment[];
   const evidence = analysis.evidence || null;
   const collector = analysis.collector_health || null;
-  const showingOlderResult = Boolean(latestRun && run && latestRun.id !== run.id);
+  const showingOlderResult = Boolean(latestRun && stableRunId && latestRun.id !== stableRunId);
+  const loading = keywordsLoading || runLoading || Boolean(stableRunId && loadedRunId !== stableRunId);
+  const visibleRunError = loadedRunId === stableRunId ? runError : "";
+  const pageError = keywordsError || visibleRunError;
+  const visibleTrend = loadedTrendKey === trendRequestKey ? trend : null;
+  const visibleTrendError = loadedTrendKey === trendRequestKey ? trendError : "";
+  const trendPending = Boolean(run && trendRequestKey && (trendLoading || loadedTrendKey !== trendRequestKey));
+  const retryRun = () => {
+    if (keywordsError) refresh().catch(() => {});
+    setLoadedRunId(null);
+    setRunLoading(true);
+    setRunError("");
+    setRunReloadKey((value) => value + 1);
+  };
+  const retryTrend = () => {
+    setLoadedTrendKey("");
+    setTrendLoading(true);
+    setTrendError("");
+    setTrendReloadKey((value) => value + 1);
+  };
 
   return <div className="page-stack">
     <section className="section-heading">
@@ -60,9 +127,13 @@ export default function AIAnalysis() {
       </select>
     </section>
 
-    {showingOlderResult && <div className="info-box">最新任务状态：{latestRun?.status}。当前先展示最近一次可用分析结果；页面每 3 秒刷新，完成后会自动替换。</div>}
+    {loading && <div className="data-state panel" role="status"><LoaderCircle className="state-spinner" /><div><strong>正在加载分析证据</strong><span>先读取机会分与平台结论，近期趋势独立加载。</span></div></div>}
+    {!loading && pageError && <div className="data-state error-state panel" role="alert"><AlertCircle /><div><strong>分析详情加载失败</strong><span>{pageError}</span></div><button onClick={retryRun}><RefreshCw />重新加载</button></div>}
 
-    {!run ? <div className="empty-state panel">这个关键词还没有可用的分析结果。</div> : <>
+    {!loading && !pageError && showingOlderResult && <div className="info-box">最新任务状态：{latestRun?.status}。当前先展示最近一次可用分析结果；采集中任务每 3 秒检查，等待验证或稳定后降低刷新频率。</div>}
+
+    {!loading && !pageError && (!item || !run) ? <div className="empty-state panel">{item ? "这个关键词还没有可用的分析结果。" : "还没有可分析的关键词。"}</div> : null}
+    {!loading && !pageError && run ? <>
       <section className="score-banner panel">
         <div className="score-orb"><span>机会分</span><strong>{run.opportunity_score ?? "—"}</strong><small>完整度 {run.confidence ?? 0}%</small></div>
         <div><span className="eyebrow">VERDICT</span><h3>{run.verdict}</h3><p>{analysis.methodology}</p></div>
@@ -92,23 +163,28 @@ export default function AIAnalysis() {
         </div>}
       </section>}
 
-      {trend && <section className="panel chart-panel">
+      {trendPending && <div className="data-state panel" role="status"><LoaderCircle className="state-spinner" /><div><strong>正在加载近期趋势</strong><span>主机会分已经可用，趋势证据稍后补充。</span></div></div>}
+      {!trendPending && visibleTrendError && <section className="panel">
         <div className="panel-title"><div><span>TEMPORAL EVIDENCE</span><h3>近期销量 / 评论动量</h3></div><Activity /></div>
-        {trend.status === "insufficient_history" ? <div className="method-note"><Activity /> {trend.message}</div> : <>
-          <p className="method-note"><Activity /> {trend.message} 当前对比间隔 {trend.interval_hours} 小时；这是辅助证据，暂不直接改写主机会分。</p>
-          {trend.overall && <div className="stat-grid">
-            <article className="stat-card"><span>历史匹配</span><strong>{trend.overall.matched_items}</strong><small>{trend.overall.match_rate}% · 可靠度 {trend.overall.reliability}%</small></article>
-            <article className="stat-card"><span>近期活跃商品</span><strong>{trend.overall.activity_share == null ? "—" : `${trend.overall.activity_share}%`}</strong><small>sold 或 review 有增长</small></article>
-            <article className="stat-card"><span>中位 Sold / 日</span><strong>{trend.overall.median_sold_velocity_per_day ?? "—"}</strong><small>中位增量 {trend.overall.median_sold_delta ?? "—"}</small></article>
-            <article className="stat-card"><span>价格中位波动</span><strong>{trend.overall.median_abs_price_change_pct == null ? "—" : `${trend.overall.median_abs_price_change_pct}%`}</strong><small>排名中位变化 {trend.overall.median_rank_change ?? "—"}</small></article>
+        <div className="method-note"><AlertCircle /><span>趋势加载失败，不影响上面的主机会分：{visibleTrendError}</span><button className="table-action" onClick={retryTrend}><RefreshCw />重试趋势</button></div>
+      </section>}
+      {!trendPending && !visibleTrendError && visibleTrend && <section className="panel chart-panel">
+        <div className="panel-title"><div><span>TEMPORAL EVIDENCE</span><h3>近期销量 / 评论动量</h3></div><Activity /></div>
+        {visibleTrend.status === "insufficient_history" ? <div className="method-note"><Activity /> {visibleTrend.message}</div> : <>
+          <p className="method-note"><Activity /> {visibleTrend.message} 当前对比间隔 {visibleTrend.interval_hours} 小时；这是辅助证据，暂不直接改写主机会分。</p>
+          {visibleTrend.overall && <div className="stat-grid">
+            <article className="stat-card"><span>历史匹配</span><strong>{visibleTrend.overall.matched_items}</strong><small>{visibleTrend.overall.match_rate}% · 可靠度 {visibleTrend.overall.reliability}%</small></article>
+            <article className="stat-card"><span>近期活跃商品</span><strong>{visibleTrend.overall.activity_share == null ? "—" : `${visibleTrend.overall.activity_share}%`}</strong><small>sold 或 review 有增长</small></article>
+            <article className="stat-card"><span>中位 Sold / 日</span><strong>{visibleTrend.overall.median_sold_velocity_per_day ?? "—"}</strong><small>中位增量 {visibleTrend.overall.median_sold_delta ?? "—"}</small></article>
+            <article className="stat-card"><span>价格中位波动</span><strong>{visibleTrend.overall.median_abs_price_change_pct == null ? "—" : `${visibleTrend.overall.median_abs_price_change_pct}%`}</strong><small>排名中位变化 {visibleTrend.overall.median_rank_change ?? "—"}</small></article>
           </div>}
-          {trend.recommendations?.length > 0 && <div className="recommendation-list">
-            {trend.recommendations.map((text: string, index: number) => <article key={index}><CheckCircle2 /><span>{text}</span><ArrowRight /></article>)}
+          {visibleTrend.recommendations?.length > 0 && <div className="recommendation-list">
+            {visibleTrend.recommendations.map((text: string, index: number) => <article key={index}><CheckCircle2 /><span>{text}</span><ArrowRight /></article>)}
           </div>}
           <div className="table-shell">
             <table>
               <thead><tr><th>平台</th><th>匹配率</th><th>活跃占比</th><th>Sold / 日</th><th>Review / 日</th><th>价格波动</th><th>排名变化</th><th>可靠度</th></tr></thead>
-              <tbody>{Object.entries(trend.platforms || {}).map(([name, value]: [string, any]) => <tr key={name}>
+              <tbody>{Object.entries(visibleTrend.platforms || {}).map(([name, value]: [string, any]) => <tr key={name}>
                 <td><strong>{name}</strong></td>
                 <td>{value.matched_items}/{value.current_items}<small>{value.match_rate}%</small></td>
                 <td>{value.activity_share == null ? "—" : `${value.activity_share}%`}</td>
@@ -155,7 +231,7 @@ export default function AIAnalysis() {
         </div>
         <div className="method-note"><AlertCircle /> 机会分不是利润预测；下单前仍需核算采购、物流、平台费用、广告成本，并确认被拆分的商品族在供应链上确实可独立销售。</div>
       </section>
-    </>}
+    </> : null}
   </div>;
 }
 

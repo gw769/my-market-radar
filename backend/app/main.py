@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -13,6 +14,7 @@ else:
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import HTTPException as FastAPIHTTPException
@@ -42,6 +44,29 @@ KNOWN_INSECURE_SECRET_KEYS = {
 _frontend_out = _base_dir / "frontend" / "dist"
 if not _frontend_out.exists():
     _frontend_out = _project_root / "frontend" / "dist"
+
+_HASHED_ASSET_RE = re.compile(r".+-[A-Za-z0-9_-]{8,}\.[^.]+$")
+_IMMUTABLE_ASSET_CACHE = "public, max-age=31536000, immutable"
+_HTML_CACHE = "no-cache"
+
+
+def _is_hashed_asset(path: str) -> bool:
+    return bool(_HASHED_ASSET_RE.fullmatch(Path(path).name))
+
+
+class CachedStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        if response.status_code == 200 and _is_hashed_asset(path):
+            response.headers["Cache-Control"] = _IMMUTABLE_ASSET_CACHE
+        return response
+
+
+def _index_response() -> FileResponse:
+    return FileResponse(
+        str(_frontend_out / "index.html"),
+        headers={"Cache-Control": _HTML_CACHE},
+    )
 
 
 def _safe_frontend_path(relative_path: str) -> Path | None:
@@ -164,6 +189,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
 
 app.include_router(api_router)
 
@@ -197,11 +223,11 @@ def browser_extension_package():
 if _frontend_out.exists():
     _assets_dir = _frontend_out / "assets"
     if _assets_dir.exists():
-        app.mount("/assets", StaticFiles(directory=str(_assets_dir)), name="assets")
+        app.mount("/assets", CachedStaticFiles(directory=str(_assets_dir)), name="assets")
 
     @app.get("/")
     async def serve_index():
-        return FileResponse(str(_frontend_out / "index.html"))
+        return _index_response()
 
     @app.get("/{full_path:path}")
     async def serve_frontend(full_path: str):
@@ -211,18 +237,31 @@ if _frontend_out.exists():
         if full_path.startswith("assets/"):
             file_path = _safe_frontend_path(full_path)
             if file_path and file_path.is_file():
-                return FileResponse(str(file_path))
+                headers = (
+                    {"Cache-Control": _IMMUTABLE_ASSET_CACHE}
+                    if _is_hashed_asset(file_path.name)
+                    else None
+                )
+                return FileResponse(str(file_path), headers=headers)
             return JSONResponse({"error": "Not found"}, status_code=404)
 
         file_path = _safe_frontend_path(full_path)
         if file_path and file_path.is_file():
-            return FileResponse(str(file_path))
+            headers = (
+                {"Cache-Control": _HTML_CACHE}
+                if file_path.suffix.casefold() == ".html"
+                else None
+            )
+            return FileResponse(str(file_path), headers=headers)
 
         html_path = _safe_frontend_path(f"{full_path}.html")
         if html_path and html_path.is_file():
-            return FileResponse(str(html_path))
+            return FileResponse(
+                str(html_path),
+                headers={"Cache-Control": _HTML_CACHE},
+            )
 
-        return FileResponse(str(_frontend_out / "index.html"))
+        return _index_response()
 else:
     @app.get("/")
     def root():

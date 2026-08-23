@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from fastapi import HTTPException
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -316,6 +316,132 @@ class RunnerStateTests(unittest.TestCase):
         self.assertEqual(payload["max_results_per_platform"], 60)
         db.close()
 
+    def test_keyword_list_summary_is_bounded_and_both_modes_use_three_queries(self):
+        db = self.Session()
+        keyword = db.query(TrackedKeyword).filter_by(id=self.keyword_id).one()
+        stable = AnalysisRun(
+            keyword_id=keyword.id,
+            status="completed",
+            progress=100,
+            opportunity_score=68.0,
+            verdict="谨慎观察",
+            confidence=82.0,
+            platform_scores={
+                "shopee": {"score": 70.0, "metrics": {"median_price": 10.0}},
+                "lazada": {"score": 66.0, "metrics": {"median_price": 20.5}},
+            },
+            analysis={
+                "platform_errors": {"lazada": "部分页面不完整"},
+                "counts": {"shopee": 20, "lazada": 10},
+                "evidence": {"grade": "B", "label": "可辅助决策", "reasons": ["full-only"]},
+                "opportunity_segments": [{
+                    "label": "彩绘甲贴",
+                    "ranking_reliability": 72.5,
+                    "representative_titles": ["full-only"],
+                    "platform_scores": {"full": "only"},
+                }],
+                "recommendations": ["full-only"],
+            },
+        )
+        db.add(stable)
+        db.flush()
+        pending = AnalysisRun(
+            keyword_id=keyword.id,
+            status="pending",
+            progress=35,
+            current_step="等待第 2 页",
+            analysis={
+                "platform_errors": {"shopee": "等待加载"},
+                "counts": {"shopee": 7},
+                "collector_health": {"large": "full-only"},
+            },
+        )
+        db.add(pending)
+        second = TrackedKeyword(
+            user_id=self.user_id,
+            keyword="lunch box",
+            platforms=["shopee", "lazada"],
+            results_limit=20,
+        )
+        db.add(second)
+        db.flush()
+        db.add(AnalysisRun(
+            keyword_id=second.id,
+            status="partial",
+            progress=100,
+            opportunity_score=51.0,
+            analysis={"counts": {"shopee": 5, "lazada": 0}},
+        ))
+        db.commit()
+        user = db.query(User).filter_by(id=self.user_id).one()
+
+        summary_statements: list[str] = []
+        listener = lambda _conn, _cursor, statement, _params, _context, _many: summary_statements.append(statement)
+        event.listen(self.engine, "before_cursor_execute", listener)
+        try:
+            response = marketplace_api.list_keywords(
+                detail="summary",
+                db=db,
+                current_user=user,
+            )
+        finally:
+            event.remove(self.engine, "before_cursor_execute", listener)
+
+        self.assertEqual(len(summary_statements), 3)
+        rows = {row["id"]: row for row in response["data"]}
+        payload = rows[self.keyword_id]
+        self.assertEqual(payload["latest_run"]["id"], pending.id)
+        self.assertEqual(payload["latest_result_run"]["id"], stable.id)
+        self.assertEqual(
+            payload["latest_run"]["analysis"],
+            {
+                "platform_errors": {"shopee": "等待加载"},
+                "counts": {"shopee": 7},
+                "evidence": None,
+                "top_segment": None,
+                "median_price": None,
+            },
+        )
+        self.assertEqual(
+            payload["latest_result_run"]["analysis"],
+            {
+                "platform_errors": {"lazada": "部分页面不完整"},
+                "counts": {"shopee": 20, "lazada": 10},
+                "evidence": {"grade": "B", "label": "可辅助决策"},
+                "top_segment": {"label": "彩绘甲贴", "ranking_reliability": 72.5},
+                "median_price": 15.25,
+            },
+        )
+        summary_keys = {
+            "id", "keyword_id", "keyword", "status", "progress", "current_step",
+            "verification_platform", "opportunity_score", "verdict", "confidence",
+            "analysis", "error_message", "created_at", "started_at", "completed_at",
+        }
+        self.assertEqual(set(payload["latest_run"]), summary_keys)
+        self.assertNotIn("platform_scores", payload["latest_result_run"])
+        self.assertNotIn("reasons", payload["latest_result_run"]["analysis"]["evidence"])
+        self.assertNotIn(
+            "representative_titles",
+            payload["latest_result_run"]["analysis"]["top_segment"],
+        )
+
+        full_statements: list[str] = []
+        full_listener = lambda _conn, _cursor, statement, _params, _context, _many: full_statements.append(statement)
+        event.listen(self.engine, "before_cursor_execute", full_listener)
+        try:
+            full = marketplace_api.list_keywords(
+                detail="full",
+                db=db,
+                current_user=user,
+            )
+        finally:
+            event.remove(self.engine, "before_cursor_execute", full_listener)
+        self.assertEqual(len(full_statements), 3)
+        full_payload = {row["id"]: row for row in full["data"]}[self.keyword_id]
+        self.assertEqual(full_payload["latest_result_run"]["platform_scores"]["shopee"]["score"], 70.0)
+        self.assertEqual(full_payload["latest_result_run"]["analysis"]["recommendations"], ["full-only"])
+        db.close()
+
     def test_items_api_exposes_page_provenance(self):
         db = self.Session()
         keyword = db.query(TrackedKeyword).filter_by(id=self.keyword_id).one()
@@ -341,6 +467,80 @@ class RunnerStateTests(unittest.TestCase):
         self.assertEqual(item["search_page"], 2)
         self.assertEqual(item["page_rank"], 4)
         self.assertEqual(item["page_size"], 20)
+        db.close()
+
+    def test_items_api_paginates_filters_and_hides_inline_images(self):
+        db = self.Session()
+        keyword = db.query(TrackedKeyword).filter_by(id=self.keyword_id).one()
+        run = AnalysisRun(keyword_id=keyword.id, status="completed", progress=100)
+        db.add(run)
+        db.flush()
+        snapshots = [
+            ("shopee", "s1", "Red Nail Sticker", 1, "data:image/png;base64,AAAA"),
+            ("shopee", "s2", "Blue Bottle", 2, "blob:https://shopee.com.my/abc"),
+            ("lazada", "l1", "Red Nail Art", 1, "https://img.example/l1.jpg"),
+            ("lazada", "l2", "red nail sticker", 2, "http://img.example/l2.jpg"),
+            ("lazada", "l3", "100% Nail Sticker", 3, None),
+        ]
+        for platform, item_id, title, rank, image in snapshots:
+            db.add(ListingSnapshot(
+                run_id=run.id,
+                keyword_id=keyword.id,
+                platform=platform,
+                item_id=item_id,
+                title=title,
+                product_url=f"https://example.test/{item_id}",
+                image_url=image,
+                search_rank=rank,
+                raw_data={"search_page": 1, "page_rank": rank, "page_size": 20},
+            ))
+        db.commit()
+        user = db.query(User).filter_by(id=self.user_id).one()
+
+        legacy = marketplace_api.get_items(run.id, db=db, current_user=user)
+        self.assertEqual(set(legacy), {"success", "data"})
+        self.assertEqual(len(legacy["data"]), 5)
+        legacy_by_id = {row["item_id"]: row for row in legacy["data"]}
+        self.assertIsNone(legacy_by_id["s1"]["image_url"])
+        self.assertIsNone(legacy_by_id["s2"]["image_url"])
+        self.assertEqual(legacy_by_id["l1"]["image_url"], "https://img.example/l1.jpg")
+
+        first = marketplace_api.get_items(
+            run.id,
+            platform="lazada",
+            limit=1,
+            offset=0,
+            q="red nail",
+            db=db,
+            current_user=user,
+        )
+        self.assertEqual([row["item_id"] for row in first["data"]], ["l1"])
+        self.assertEqual(
+            first["pagination"],
+            {"total": 2, "limit": 1, "offset": 0, "has_more": True},
+        )
+        second_page = marketplace_api.get_items(
+            run.id,
+            platform="lazada",
+            limit=1,
+            offset=1,
+            q="red nail",
+            db=db,
+            current_user=user,
+        )
+        self.assertEqual([row["item_id"] for row in second_page["data"]], ["l2"])
+        self.assertEqual(
+            second_page["pagination"],
+            {"total": 2, "limit": 1, "offset": 1, "has_more": False},
+        )
+        literal_percent = marketplace_api.get_items(
+            run.id,
+            q="100%",
+            limit=10,
+            db=db,
+            current_user=user,
+        )
+        self.assertEqual([row["item_id"] for row in literal_percent["data"]], ["l3"])
         db.close()
 
     def test_page_warning_prevents_completed_final_status(self):

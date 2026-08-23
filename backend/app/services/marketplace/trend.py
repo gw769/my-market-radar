@@ -4,7 +4,7 @@ import statistics
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from app.models.marketplace import AnalysisRun, ListingSnapshot, TrackedKeyword
 from app.services.marketplace.scoring import relevance_score
@@ -95,6 +95,14 @@ def _relevant_snapshot_rows(rows: list[ListingSnapshot], keyword: str) -> list[L
 def build_keyword_trend(db: Session, keyword_id: int) -> dict[str, Any]:
     runs = (
         db.query(AnalysisRun)
+        .options(
+            load_only(
+                AnalysisRun.id,
+                AnalysisRun.created_at,
+                AnalysisRun.completed_at,
+                raiseload=True,
+            )
+        )
         .filter(
             AnalysisRun.keyword_id == keyword_id,
             AnalysisRun.status.in_(RESULT_STATUSES),
@@ -115,7 +123,12 @@ def build_keyword_trend(db: Session, keyword_id: int) -> dict[str, Any]:
             "recommendations": [],
         }
 
-    keyword_row = db.query(TrackedKeyword).filter(TrackedKeyword.id == keyword_id).first()
+    keyword_row = (
+        db.query(TrackedKeyword)
+        .options(load_only(TrackedKeyword.id, TrackedKeyword.keyword, raiseload=True))
+        .filter(TrackedKeyword.id == keyword_id)
+        .first()
+    )
     keyword_text = str(keyword_row.keyword if keyword_row else "")
     current_run, previous_run = runs[0], runs[1]
     current_time = _run_time(current_run)
@@ -127,11 +140,41 @@ def build_keyword_trend(db: Session, keyword_id: int) -> dict[str, Any]:
     )
 
     current_rows = _relevant_snapshot_rows(
-        db.query(ListingSnapshot).filter(ListingSnapshot.run_id == current_run.id).all(),
+        db.query(ListingSnapshot)
+        .options(
+            load_only(
+                ListingSnapshot.id,
+                ListingSnapshot.platform,
+                ListingSnapshot.item_id,
+                ListingSnapshot.title,
+                ListingSnapshot.price,
+                ListingSnapshot.sold_count,
+                ListingSnapshot.review_count,
+                ListingSnapshot.search_rank,
+                raiseload=True,
+            )
+        )
+        .filter(ListingSnapshot.run_id == current_run.id)
+        .all(),
         keyword_text,
     )
     previous_rows = _relevant_snapshot_rows(
-        db.query(ListingSnapshot).filter(ListingSnapshot.run_id == previous_run.id).all(),
+        db.query(ListingSnapshot)
+        .options(
+            load_only(
+                ListingSnapshot.id,
+                ListingSnapshot.platform,
+                ListingSnapshot.item_id,
+                ListingSnapshot.title,
+                ListingSnapshot.price,
+                ListingSnapshot.sold_count,
+                ListingSnapshot.review_count,
+                ListingSnapshot.search_rank,
+                raiseload=True,
+            )
+        )
+        .filter(ListingSnapshot.run_id == previous_run.id)
+        .all(),
         keyword_text,
     )
     previous_map = {(row.platform, row.item_id): row for row in previous_rows}

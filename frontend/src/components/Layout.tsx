@@ -1,6 +1,8 @@
+import { Suspense } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { BarChart3, BrainCircuit, Compass, FileSpreadsheet, LayoutDashboard, LogOut, Radar, RefreshCw, Search, Store, User } from "lucide-react";
+import { BarChart3, BrainCircuit, Compass, FileSpreadsheet, LayoutDashboard, LoaderCircle, LogOut, Radar, RefreshCw, Search, Store, User } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
+import RouteErrorBoundary from "@/components/RouteErrorBoundary";
 import "./layout-overrides.css";
 
 const NAV = [
@@ -31,7 +33,7 @@ export default function Layout() {
           <div><span className="eyebrow">MARKET INTELLIGENCE</span><h1>{current}</h1></div>
           <div className="top-actions"><div className="country-pill"><BarChart3 size={15} /> 双平台实时快照</div><div className="user-pill"><User size={16} /><span>{user?.name || "本地用户"}</span><button aria-label="退出" onClick={() => { logout(); navigate("/login"); }}><LogOut size={15} /></button></div></div>
         </header>
-        <main className="content"><Outlet /></main>
+        <main className="content"><RouteErrorBoundary resetKey={pathname}><Suspense fallback={<div className="route-loading panel" role="status"><LoaderCircle className="state-spinner" /><span>正在打开页面…</span></div>}><Outlet /></Suspense></RouteErrorBoundary></main>
       </div>
     </div>
   );

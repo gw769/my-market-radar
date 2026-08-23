@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { AlertTriangle, Clock3, LoaderCircle, Monitor, Pause, Play, RefreshCw, Trash2 } from "lucide-react";
-import { apiDelete, apiGet, apiPatch, apiPost } from "@/lib/api";
+import { useKeywordSummaries } from "@/hooks/useKeywordSummaries";
+import { apiDelete, apiPatch, apiPost } from "@/lib/api";
 import StatusBadge from "@/components/StatusBadge";
-import type { Keyword } from "@/types";
 
 const ACTIVE_RUNS = new Set(["pending", "running", "needs_verification"]);
 const DELETE_BLOCKED_RUNS = new Set(["pending", "running"]);
@@ -12,23 +12,14 @@ const RESULT_RUNS = new Set(["completed", "partial"]);
 export default function Tracking() {
   const [params] = useSearchParams();
   const highlighted = Number(params.get("run_id") || 0);
-  const [keywords, setKeywords] = useState<Keyword[]>([]);
+  const { keywords, loading, error, refresh } = useKeywordSummaries();
   const [message, setMessage] = useState("");
-  const load = useCallback(() => apiGet<any>("/keywords").then((r) => setKeywords(r.data || [])), []);
-
-  useEffect(() => {
-    load().catch(() => {});
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") load().catch(() => {});
-    }, 3000);
-    return () => window.clearInterval(timer);
-  }, [load]);
 
   const action = async (fn: () => Promise<any>, ok: string) => {
     try {
       await fn();
       setMessage(ok);
-      await load();
+      await refresh(true);
     } catch (e: any) {
       setMessage(e.message || "操作失败");
     }
@@ -52,9 +43,11 @@ export default function Tracking() {
     </section>
 
     {message && <div className="info-box">{message}</div>}
+    {loading && <div className="data-state panel" role="status"><LoaderCircle className="state-spinner" /><div><strong>正在同步跟踪状态</strong><span>活跃任务每 3 秒更新，稳定后自动降低频率。</span></div></div>}
+    {!loading && error && <div className="data-state error-state panel" role="alert"><AlertTriangle /><div><strong>跟踪状态加载失败</strong><span>{error}</span></div><button onClick={() => refresh().catch(() => {})}><RefreshCw />重新加载</button></div>}
     <div className="tracking-list">
-      {keywords.length === 0 && <div className="empty-state">还没有跟踪关键词。先去“关键词分析”创建一个。</div>}
-      {keywords.map((item) => {
+      {!loading && !error && keywords.length === 0 && <div className="empty-state">还没有跟踪关键词。先去“关键词分析”创建一个。</div>}
+      {!loading && !error && keywords.map((item) => {
         const run = item.latest_run;
         const searchPages = item.search_pages || 3;
         const maxPerPlatform = item.results_limit * searchPages;

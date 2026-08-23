@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import math
 from datetime import timezone
+from typing import Annotated, Literal
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -34,7 +36,10 @@ def _keyword_payload(
     keyword: TrackedKeyword,
     latest: AnalysisRun | None = None,
     latest_result: AnalysisRun | None = None,
+    *,
+    detail: Literal["full", "summary"] = "full",
 ) -> dict:
+    run_payload = _run_summary_payload if detail == "summary" else _run_payload
     return {
         "id": keyword.id,
         "keyword": keyword.keyword,
@@ -49,16 +54,18 @@ def _keyword_payload(
         "last_run_at": _iso(keyword.last_run_at),
         "last_success_at": _iso(keyword.last_success_at),
         "next_run_at": _iso(keyword.next_run_at),
-        "latest_run": _run_payload(latest) if latest else None,
-        "latest_result_run": _run_payload(latest_result) if latest_result else None,
+        "latest_run": run_payload(latest, keyword.keyword) if latest else None,
+        "latest_result_run": run_payload(latest_result, keyword.keyword) if latest_result else None,
     }
 
 
-def _run_payload(run: AnalysisRun) -> dict:
+def _run_payload(run: AnalysisRun, keyword: str | None = None) -> dict:
     return {
         "id": run.id,
         "keyword_id": run.keyword_id,
-        "keyword": run.tracked_keyword.keyword if run.tracked_keyword else None,
+        "keyword": keyword if keyword is not None else (
+            run.tracked_keyword.keyword if run.tracked_keyword else None
+        ),
         "trigger": run.trigger,
         "status": run.status,
         "progress": run.progress,
@@ -74,6 +81,83 @@ def _run_payload(run: AnalysisRun) -> dict:
         "started_at": _iso(run.started_at),
         "completed_at": _iso(run.completed_at),
     }
+
+
+def _run_summary_payload(run: AnalysisRun, keyword: str | None = None) -> dict:
+    analysis = run.analysis if isinstance(run.analysis, dict) else {}
+    evidence = analysis.get("evidence")
+    compact_evidence = (
+        {"grade": evidence.get("grade"), "label": evidence.get("label")}
+        if isinstance(evidence, dict)
+        else None
+    )
+    segments = analysis.get("opportunity_segments")
+    top_segment = segments[0] if isinstance(segments, list) and segments else None
+    compact_top_segment = (
+        {
+            "label": top_segment.get("label"),
+            "ranking_reliability": top_segment.get("ranking_reliability"),
+        }
+        if isinstance(top_segment, dict)
+        else None
+    )
+    prices: list[float] = []
+    platform_scores = run.platform_scores if isinstance(run.platform_scores, dict) else {}
+    for score in platform_scores.values():
+        metrics = score.get("metrics") if isinstance(score, dict) else None
+        value = metrics.get("median_price") if isinstance(metrics, dict) else None
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            numeric = float(value)
+            if math.isfinite(numeric):
+                prices.append(numeric)
+    return {
+        "id": run.id,
+        "keyword_id": run.keyword_id,
+        "keyword": keyword if keyword is not None else (
+            run.tracked_keyword.keyword if run.tracked_keyword else None
+        ),
+        "status": run.status,
+        "progress": run.progress,
+        "current_step": run.current_step,
+        "verification_platform": run.verification_platform,
+        "opportunity_score": run.opportunity_score,
+        "verdict": run.verdict,
+        "confidence": run.confidence,
+        "analysis": {
+            "platform_errors": analysis.get("platform_errors") or {},
+            "counts": analysis.get("counts") or {},
+            "evidence": compact_evidence,
+            "top_segment": compact_top_segment,
+            "median_price": sum(prices) / len(prices) if prices else None,
+        },
+        "error_message": run.error_message,
+        "created_at": _iso(run.created_at),
+        "started_at": _iso(run.started_at),
+        "completed_at": _iso(run.completed_at),
+    }
+
+
+def _latest_runs_by_keyword(
+    db: Session,
+    keyword_ids: list[int],
+    *,
+    result_only: bool = False,
+) -> dict[int, AnalysisRun]:
+    if not keyword_ids:
+        return {}
+    latest_ids = db.query(
+        AnalysisRun.keyword_id.label("keyword_id"),
+        func.max(AnalysisRun.id).label("run_id"),
+    ).filter(AnalysisRun.keyword_id.in_(keyword_ids))
+    if result_only:
+        latest_ids = latest_ids.filter(AnalysisRun.status.in_(RESULT_STATUSES))
+    latest_ids = latest_ids.group_by(AnalysisRun.keyword_id).subquery()
+    rows = (
+        db.query(AnalysisRun)
+        .join(latest_ids, AnalysisRun.id == latest_ids.c.run_id)
+        .all()
+    )
+    return {int(run.keyword_id): run for run in rows}
 
 
 def _latest_result(db: Session, keyword_id: int) -> AnalysisRun | None:
@@ -146,12 +230,29 @@ def add_keyword(payload: KeywordCreate, db: Session = Depends(get_db), current_u
 
 
 @router.get("/keywords")
-def list_keywords(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    keywords = db.query(TrackedKeyword).filter(TrackedKeyword.user_id == current_user.id).order_by(TrackedKeyword.updated_at.desc()).all()
-    data = []
-    for keyword in keywords:
-        latest = db.query(AnalysisRun).filter(AnalysisRun.keyword_id == keyword.id).order_by(AnalysisRun.id.desc()).first()
-        data.append(_keyword_payload(keyword, latest, _latest_result(db, keyword.id)))
+def list_keywords(
+    detail: Annotated[Literal["full", "summary"], Query()] = "full",
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    keywords = (
+        db.query(TrackedKeyword)
+        .filter(TrackedKeyword.user_id == current_user.id)
+        .order_by(TrackedKeyword.updated_at.desc())
+        .all()
+    )
+    keyword_ids = [int(keyword.id) for keyword in keywords]
+    latest_runs = _latest_runs_by_keyword(db, keyword_ids)
+    latest_results = _latest_runs_by_keyword(db, keyword_ids, result_only=True)
+    data = [
+        _keyword_payload(
+            keyword,
+            latest_runs.get(int(keyword.id)),
+            latest_results.get(int(keyword.id)),
+            detail=detail,
+        )
+        for keyword in keywords
+    ]
     return {"success": True, "data": data}
 
 
@@ -195,24 +296,81 @@ def get_run(run_id: int, db: Session = Depends(get_db), current_user: User = Dep
 
 
 @router.get("/runs/{run_id}/items")
-def get_items(run_id: int, platform: str | None = Query(default=None), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def get_items(
+    run_id: int,
+    platform: Annotated[str | None, Query()] = None,
+    limit: Annotated[int | None, Query(ge=1, le=100)] = None,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    q: Annotated[str | None, Query(max_length=200)] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     run = _owned_run(db, current_user.id, run_id)
-    query = db.query(ListingSnapshot).filter(ListingSnapshot.run_id == run.id)
+    filters = [ListingSnapshot.run_id == run.id]
     if platform:
-        query = query.filter(ListingSnapshot.platform == platform)
-    rows = query.order_by(ListingSnapshot.platform, ListingSnapshot.search_rank).all()
-    return {"success": True, "data": [{
+        filters.append(ListingSnapshot.platform == platform)
+    search_text = " ".join(str(q or "").split())
+    if search_text:
+        escaped = search_text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        filters.append(ListingSnapshot.title.ilike(f"%{escaped}%", escape="\\"))
+
+    image_url = case(
+        (func.lower(ListingSnapshot.image_url).like("data:%"), None),
+        (func.lower(ListingSnapshot.image_url).like("blob:%"), None),
+        else_=ListingSnapshot.image_url,
+    ).label("image_url")
+    query = db.query(
+        ListingSnapshot.id,
+        ListingSnapshot.platform,
+        ListingSnapshot.item_id,
+        ListingSnapshot.title,
+        ListingSnapshot.product_url,
+        image_url,
+        ListingSnapshot.price,
+        ListingSnapshot.original_price,
+        ListingSnapshot.discount_percent,
+        ListingSnapshot.sold_count,
+        ListingSnapshot.rating,
+        ListingSnapshot.review_count,
+        ListingSnapshot.seller_name,
+        ListingSnapshot.seller_location,
+        ListingSnapshot.is_sponsored,
+        ListingSnapshot.search_rank,
+        ListingSnapshot.raw_data["search_page"].as_integer().label("search_page"),
+        ListingSnapshot.raw_data["page_rank"].as_integer().label("page_rank"),
+        ListingSnapshot.raw_data["page_size"].as_integer().label("page_size"),
+        ListingSnapshot.data_quality,
+        ListingSnapshot.collected_at,
+    ).filter(*filters)
+    total = db.query(func.count(ListingSnapshot.id)).filter(*filters).scalar() if limit else None
+    query = query.order_by(ListingSnapshot.platform, ListingSnapshot.search_rank)
+    if offset:
+        query = query.offset(offset)
+    if limit is not None:
+        query = query.limit(limit)
+    rows = query.all()
+    data = [{
         "id": row.id, "platform": row.platform, "item_id": row.item_id, "title": row.title,
         "product_url": row.product_url, "image_url": row.image_url, "price": row.price,
         "original_price": row.original_price, "discount_percent": row.discount_percent,
         "sold_count": row.sold_count, "rating": row.rating, "review_count": row.review_count,
         "seller_name": row.seller_name, "seller_location": row.seller_location,
         "is_sponsored": row.is_sponsored, "search_rank": row.search_rank,
-        "search_page": (row.raw_data or {}).get("search_page"),
-        "page_rank": (row.raw_data or {}).get("page_rank"),
-        "page_size": (row.raw_data or {}).get("page_size"),
+        "search_page": row.search_page,
+        "page_rank": row.page_rank,
+        "page_size": row.page_size,
         "data_quality": row.data_quality, "collected_at": _iso(row.collected_at),
-    } for row in rows]}
+    } for row in rows]
+    response = {"success": True, "data": data}
+    if limit is not None:
+        total_count = int(total or 0)
+        response["pagination"] = {
+            "total": total_count,
+            "limit": limit,
+            "offset": offset,
+            "has_more": offset + len(data) < total_count,
+        }
+    return response
 
 
 @router.post("/runs/{run_id}/verification-browser")
@@ -275,13 +433,20 @@ def dashboard(db: Session = Depends(get_db), current_user: User = Depends(get_cu
 
     recent_runs = run_base.order_by(AnalysisRun.id.desc()).limit(50).all()
     latest_runs = recent_runs[:8]
+    keyword_names = {int(keyword.id): keyword.keyword for keyword in keywords}
     score_history = [
-        {"run_id": run.id, "keyword": run.tracked_keyword.keyword, "score": run.opportunity_score, "created_at": _iso(run.created_at)}
+        {
+            "run_id": run.id,
+            "keyword": keyword_names.get(int(run.keyword_id)),
+            "score": run.opportunity_score,
+            "created_at": _iso(run.created_at),
+        }
         for run in reversed(recent_runs)
         if run.status in RESULT_STATUSES and run.opportunity_score is not None
     ][-30:]
 
-    stable_run_ids = [result.id for keyword in keywords if (result := _latest_result(db, keyword.id))]
+    stable_runs = _latest_runs_by_keyword(db, keyword_ids, result_only=True)
+    stable_run_ids = [result.id for result in stable_runs.values()]
     platform_counts = dict(
         db.query(ListingSnapshot.platform, func.count(ListingSnapshot.id))
         .filter(ListingSnapshot.run_id.in_(stable_run_ids))
@@ -295,6 +460,9 @@ def dashboard(db: Session = Depends(get_db), current_user: User = Depends(get_cu
         "needs_verification": needs_verification,
         "completed_runs": completed_runs,
         "platform_counts": platform_counts,
-        "latest_runs": [_run_payload(run) for run in latest_runs],
+        "latest_runs": [
+            _run_summary_payload(run, keyword_names.get(int(run.keyword_id)))
+            for run in latest_runs
+        ],
         "score_history": score_history,
     }}

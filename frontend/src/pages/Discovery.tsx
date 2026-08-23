@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Compass, Play, RefreshCw, ScanSearch, Sparkles } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { AlertCircle, Compass, LoaderCircle, Play, RefreshCw, ScanSearch, Sparkles } from "lucide-react";
+import { useKeywordSummaries } from "@/hooks/useKeywordSummaries";
 import { apiGet, apiPost } from "@/lib/api";
-import type { Keyword, Run } from "@/types";
+import type { Keyword, RunSummary } from "@/types";
 
 interface MarketplaceDefaults {
   results_limit: number;
@@ -39,7 +40,7 @@ const FALLBACK_DEFAULTS: MarketplaceDefaults = {
   platforms: ["shopee", "lazada"],
 };
 
-function resultRun(keyword?: Keyword): Run | null {
+function resultRun(keyword?: Keyword): RunSummary | null {
   if (!keyword) return null;
   const latest = keyword.latest_run;
   if (latest && RESULT_STATUSES.has(latest.status)) return latest;
@@ -48,17 +49,12 @@ function resultRun(keyword?: Keyword): Run | null {
 
 export default function Discovery() {
   const [selectedId, setSelectedId] = useState(PRESETS[0].id);
-  const [keywords, setKeywords] = useState<Keyword[]>([]);
+  const { keywords, loading: keywordsLoading, error: keywordsError, refresh } = useKeywordSummaries();
   const [defaults, setDefaults] = useState<MarketplaceDefaults>(FALLBACK_DEFAULTS);
   const [busy, setBusy] = useState(false);
   const [busySeed, setBusySeed] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
-
-  const load = useCallback(async () => {
-    const response = await apiGet<any>("/keywords");
-    setKeywords(response.data || []);
-  }, []);
 
   useEffect(() => {
     apiGet<any>("/marketplace-defaults")
@@ -77,12 +73,7 @@ export default function Discovery() {
         });
       })
       .catch(() => {});
-    load().catch(() => {});
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") load().catch(() => {});
-    }, 3000);
-    return () => window.clearInterval(timer);
-  }, [load]);
+  }, []);
 
   const preset = PRESETS.find((item) => item.id === selectedId) || PRESETS[0];
   const searchPages = defaults.search_pages || FALLBACK_DEFAULTS.search_pages;
@@ -94,11 +85,14 @@ export default function Discovery() {
     const run = resultRun(keyword);
     const latest = keyword?.latest_run || null;
     const evidence = run?.analysis?.evidence || null;
-    const topSegment = run?.analysis?.opportunity_segments?.[0] || null;
+    const topSegment = run?.analysis?.top_segment || run?.analysis?.opportunity_segments?.[0] || null;
     const prices = Object.values(run?.platform_scores || {})
       .map((score: any) => score?.metrics?.median_price)
       .filter((value: any) => typeof value === "number") as number[];
-    const medianPrice = prices.length ? prices.reduce((sum, value) => sum + value, 0) / prices.length : null;
+    const summaryMedianPrice = run?.analysis?.median_price;
+    const medianPrice = typeof summaryMedianPrice === "number"
+      ? summaryMedianPrice
+      : prices.length ? prices.reduce((sum, value) => sum + value, 0) / prices.length : null;
     const deepLimit = Math.min(40, Math.max(20, defaults.results_limit || 20, keyword?.results_limit || 0));
     const active = Boolean(latest && ACTIVE_STATUSES.has(latest.status));
     return { seed, keyword, latest, run, evidence, topSegment, medianPrice, deepLimit, active };
@@ -156,7 +150,7 @@ export default function Discovery() {
     if (failed.length) parts.push(`${failed.length} 个提交失败`);
     setMessage(`${parts.join("，")}。已有深扫结果不会被快速扫描覆盖。`);
     setError(failed.length ? `未提交成功：${failed.join("、")}。其他候选已继续处理，可稍后再次补提交。` : "");
-    try { await load(); } catch { /* polling will retry */ }
+    try { await refresh(true); } catch { /* polling will retry */ }
     setBusy(false);
   };
 
@@ -175,7 +169,7 @@ export default function Discovery() {
       } else {
         setError(`${seed} 深度扫描没有进入队列，请稍后重试。`);
       }
-      await load();
+      await refresh(true);
     } catch (err: any) {
       setError(err.message || `${seed} 深度扫描失败`);
     } finally {
@@ -193,6 +187,9 @@ export default function Discovery() {
       <div className="hero-signal"><Compass /><strong>{preset.seeds.length}</strong><span>候选关键词<br />前 {searchPages} 页 · {quickLimit} 条/页 · 最多 {quickPlatformMax}/平台</span></div>
     </section>
 
+    {keywordsLoading && <div className="data-state panel" role="status"><LoaderCircle className="state-spinner" /><div><strong>正在同步候选结果</strong><span>只读取轻量评分摘要，已有扫描不会重复提交。</span></div></div>}
+    {!keywordsLoading && keywordsError && <div className="data-state error-state panel" role="alert"><AlertCircle /><div><strong>候选状态加载失败</strong><span>{keywordsError}</span></div><button onClick={() => refresh().catch(() => {})}><RefreshCw />重新加载</button></div>}
+
     <section className="panel">
       <div className="panel-title"><div><span>DISCOVERY PRESETS</span><h3>选择市场方向</h3></div><Sparkles /></div>
       <div className="platform-grid">
@@ -200,11 +197,11 @@ export default function Discovery() {
           <Compass /><div><strong>{item.name}</strong><span>{item.description}</span></div><i />
         </button>)}
       </div>
-      <div className="notice-row"><RefreshCw size={17} /><span>当前：{readyCount}/{preset.seeds.length} 个候选已有稳定结果，{activeCount} 个任务进行中，{missingCount} 个尚无结果。</span></div>
+      <div className="notice-row"><RefreshCw size={17} /><span>{keywordsLoading ? "正在读取候选状态…" : keywordsError ? "候选状态暂时不可用，请重新加载后再提交。" : `当前：${readyCount}/${preset.seeds.length} 个候选已有稳定结果，${activeCount} 个任务进行中，${missingCount} 个尚无结果。`}</span></div>
       {message && <div className="info-box">{message}</div>}
       {error && <div className="error-box">{error}</div>}
-      <button className="primary-button analyze-button" disabled={busy || (missingCount === 0 && activeCount === 0)} onClick={startDiscovery}>
-        {busy ? "正在提交候选…" : missingCount > 0 ? `补充 ${missingCount} 个未完成候选` : activeCount > 0 ? "等待当前候选完成" : "这一组已有结果"}<Play size={18} />
+      <button className="primary-button analyze-button" disabled={keywordsLoading || Boolean(keywordsError) || busy || (missingCount === 0 && activeCount === 0)} onClick={startDiscovery}>
+        {keywordsLoading ? "正在读取候选…" : busy ? "正在提交候选…" : missingCount > 0 ? `补充 ${missingCount} 个未完成候选` : activeCount > 0 ? "等待当前候选完成" : "这一组已有结果"}<Play size={18} />
       </button>
     </section>
 
@@ -214,7 +211,7 @@ export default function Discovery() {
       <div className="table-shell">
         <table>
           <thead><tr><th>#</th><th>候选</th><th>状态</th><th>Evidence</th><th>机会分</th><th>完整度</th><th>中位价</th><th>最高商品族</th><th>商品族可靠度</th><th>操作</th></tr></thead>
-          <tbody>{rows.map((row, index) => <tr key={row.seed}>
+          <tbody>{!keywordsLoading && !keywordsError && rows.map((row, index) => <tr key={row.seed}>
             <td><b>#{index + 1}</b></td>
             <td><strong>{row.seed}</strong></td>
             <td>{row.latest?.status || "未扫描"}</td>
