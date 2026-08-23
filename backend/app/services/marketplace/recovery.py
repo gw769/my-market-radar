@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import Callable
 
 from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.core.logging import logger
 from app.models.marketplace import AnalysisRun
+from app.services.marketplace.recovery_worker import submit_recovery_run
 from app.services.marketplace.runner import submit_run
 
 settings = get_settings()
@@ -28,10 +30,14 @@ def _reset_for_recovery(run: AnalysisRun, step: str) -> None:
     run.heartbeat_at = None
 
 
-def _submit_recovered(run_ids: list[int], source: str) -> int:
+def _submit_recovered(
+    run_ids: list[int],
+    source: str,
+    submitter: Callable[[int], bool],
+) -> int:
     queued = 0
     for run_id in run_ids:
-        if submit_run(run_id):
+        if submitter(run_id):
             queued += 1
     if run_ids:
         logger.info("%s恢复任务: found=%s queued=%s", source, len(run_ids), queued)
@@ -57,15 +63,19 @@ def recover_interrupted_runs() -> int:
     finally:
         db.close()
 
-    return _submit_recovered(run_ids, "启动")
+    # After process restart there are no old in-memory threads, so the normal serial queue is
+    # exactly what we want.
+    return _submit_recovered(run_ids, "启动", submit_run)
 
 
 def recover_stale_runs(now: datetime | None = None) -> int:
-    """Requeue running attempts whose worker lease stopped heartbeating.
+    """Replace running attempts whose live worker lease stopped heartbeating.
 
-    This handles a live process where a collector thread exits unexpectedly or stops making
-    progress. The new worker receives a new worker_id; runner-side ownership checks prevent an
-    expired worker from overwriting the recovered attempt if it later returns.
+    A stale worker can still occupy runner's single normal executor forever. Therefore stale
+    recovery must not call submit_run(), which intentionally deduplicates against that old
+    in-memory run_id. Instead it uses a small independent recovery executor. The database worker
+    lease is cleared before submission, so any old worker that wakes later loses ownership and
+    cannot write checkpoints/final results.
     """
     now = now or _utcnow()
     if now.tzinfo is not None:
@@ -91,11 +101,11 @@ def recover_stale_runs(now: datetime | None = None) -> int:
                 run.worker_id,
                 lease_time,
             )
-            _reset_for_recovery(run, "采集 worker 心跳超时，等待自动恢复")
+            _reset_for_recovery(run, "采集 worker 心跳超时，启动独立恢复 worker")
             run_ids.append(run.id)
         if run_ids:
             db.commit()
     finally:
         db.close()
 
-    return _submit_recovered(run_ids, "心跳超时")
+    return _submit_recovered(run_ids, "心跳超时", submit_recovery_run)
