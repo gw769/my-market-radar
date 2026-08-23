@@ -14,11 +14,7 @@ def assess_collection_health(
     listings: list[Any],
     target_limit: int,
 ) -> dict[str, Any]:
-    """Describe whether the collector itself looks healthy, separate from market quality.
-
-    A weak market and a broken parser can both produce few usable rows. This health object keeps
-    those two cases distinguishable by tracking raw-card parsing and critical public-field coverage.
-    """
+    """Describe whether the collector itself looks healthy, separate from market quality."""
     raw_count = len(raw_cards)
     parsed_count = len(listings)
     parse_ratio = parsed_count / raw_count if raw_count else (1.0 if parsed_count else 0.0)
@@ -27,14 +23,17 @@ def assess_collection_health(
     sold_coverage = _coverage(listings, "sold_count")
     review_coverage = _coverage(listings, "review_count")
     rating_coverage = _coverage(listings, "rating")
-    seller_coverage = sum(
-        bool(getattr(item, "shop_id", None) or getattr(item, "seller_name", None))
-        for item in listings
-    ) / parsed_count if parsed_count else 0.0
+    seller_coverage = (
+        sum(
+            bool(getattr(item, "shop_id", None) or getattr(item, "seller_name", None))
+            for item in listings
+        )
+        / parsed_count
+        if parsed_count
+        else 0.0
+    )
     demand_coverage = max(sold_coverage, review_coverage)
 
-    # Empty search pages are not automatically parser failures. When cards are present, however,
-    # inability to turn them into listings is a strong collector-health signal.
     parse_component = parse_ratio if raw_count else (0.6 if parsed_count == 0 else 1.0)
     score = (
         parse_component * 0.35
@@ -88,7 +87,7 @@ def summarize_collector_health(
     values = [platform_health[platform] for platform in requested]
     scores = [float(value.get("health_score") or 0) for value in values]
     statuses = {platform: platform_health[platform].get("status", "unknown") for platform in requested}
-    unhealthy = [platform for platform, status in statuses.items() if status == "unhealthy"]
+    unhealthy = [platform for platform, status in statuses.items() if status in {"unhealthy", "error"}]
     degraded = [platform for platform, status in statuses.items() if status in {"degraded", "empty"}]
     overall = round(sum(scores) / len(scores), 1) if scores else 0.0
     if unhealthy:
