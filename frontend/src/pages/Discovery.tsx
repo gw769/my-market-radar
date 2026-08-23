@@ -91,13 +91,14 @@ export default function Discovery() {
 
   const activeCount = rows.filter((row) => row.active).length;
   const readyCount = rows.filter((row) => row.run).length;
+  const missingCount = rows.filter((row) => !row.run && !row.active).length;
 
   const startDiscovery = async () => {
     setBusy(true);
     setError("");
     setMessage("");
     let submitted = 0;
-    let reused = 0;
+    let kept = 0;
     const failed: string[] = [];
 
     for (const seed of preset.seeds) {
@@ -105,8 +106,8 @@ export default function Discovery() {
         const existing = keywords.find((item) => item.keyword.trim().toLowerCase() === seed.toLowerCase());
         if (existing) {
           const latest = existing.latest_run;
-          if (latest && ACTIVE_STATUSES.has(latest.status)) {
-            reused += 1;
+          if ((latest && ACTIVE_STATUSES.has(latest.status)) || resultRun(existing)) {
+            kept += 1;
             continue;
           }
           const response = await apiPost<any>(`/keywords/${existing.id}/runs`);
@@ -130,10 +131,10 @@ export default function Discovery() {
       }
     }
 
-    const parts = [`已提交 ${submitted} 个候选扫描`];
-    if (reused) parts.push(`${reused} 个已在队列中`);
+    const parts = [`已提交 ${submitted} 个缺失候选`];
+    if (kept) parts.push(`${kept} 个已有结果/任务保持不变`);
     if (failed.length) parts.push(`${failed.length} 个提交失败`);
-    setMessage(`${parts.join("，")}。结果会自动刷新。`);
+    setMessage(`${parts.join("，")}。已有深扫结果不会被快速扫描覆盖。`);
     setError(failed.length ? `未提交成功：${failed.join("、")}。其他候选已继续处理，可稍后再次补提交。` : "");
     try { await load(); } catch { /* polling will retry */ }
     setBusy(false);
@@ -179,17 +180,17 @@ export default function Discovery() {
           <Compass /><div><strong>{item.name}</strong><span>{item.description}</span></div><i />
         </button>)}
       </div>
-      <div className="notice-row"><RefreshCw size={17} /><span>当前：{readyCount}/{preset.seeds.length} 个候选已有稳定结果，{activeCount} 个任务正在排队/采集/验证。</span></div>
+      <div className="notice-row"><RefreshCw size={17} /><span>当前：{readyCount}/{preset.seeds.length} 个候选已有稳定结果，{activeCount} 个任务进行中，{missingCount} 个尚无结果。</span></div>
       {message && <div className="info-box">{message}</div>}
       {error && <div className="error-box">{error}</div>}
-      <button className="primary-button analyze-button" disabled={busy} onClick={startDiscovery}>
-        {busy ? "正在提交候选…" : activeCount > 0 ? "补充 / 刷新其余候选" : "扫描这一组候选"}<Play size={18} />
+      <button className="primary-button analyze-button" disabled={busy || (missingCount === 0 && activeCount === 0)} onClick={startDiscovery}>
+        {busy ? "正在提交候选…" : missingCount > 0 ? `补充 ${missingCount} 个未完成候选` : activeCount > 0 ? "等待当前候选完成" : "这一组已有结果"}<Play size={18} />
       </button>
     </section>
 
     <section className="panel">
       <div className="panel-title"><div><span>RANKED CANDIDATES</span><h3>{preset.name} · 候选机会榜</h3></div><Sparkles /></div>
-      <p className="method-note">第一轮用快速样本筛候选；Evidence D 不进入采购判断。已有稳定结果的候选可直接“深扫”，提高本次样本上限但不修改长期跟踪配置。</p>
+      <p className="method-note">第一轮用快速样本补齐候选，已有稳定/深扫结果不会被整组按钮降级覆盖。高价值候选用单行“深扫”提高本次样本上限，不修改长期跟踪配置。</p>
       <div className="table-shell">
         <table>
           <thead><tr><th>#</th><th>候选</th><th>状态</th><th>Evidence</th><th>机会分</th><th>完整度</th><th>中位价</th><th>最高商品族</th><th>商品族可靠度</th><th>操作</th></tr></thead>
