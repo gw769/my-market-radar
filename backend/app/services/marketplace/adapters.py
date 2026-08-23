@@ -51,6 +51,28 @@ def parse_money(value: Any, require_currency: bool = False) -> float | None:
     return float(match.group(1)) if match else None
 
 
+def parse_money_range(value: Any) -> tuple[float, float] | None:
+    """Return an explicit marketplace price range, never a crossed-out old price.
+
+    Only range separators in the same textual expression count. Two independent `RM` values on
+    different lines are common current/original prices and must not be treated as a range.
+    """
+    if value is None:
+        return None
+    text = str(value).replace(",", "")
+    match = re.search(
+        r"RM\s*([0-9]+(?:\.[0-9]{1,2})?)\s*(?:-|–|—|~|to)\s*(?:RM\s*)?([0-9]+(?:\.[0-9]{1,2})?)",
+        text,
+        re.I,
+    )
+    if not match:
+        return None
+    low, high = float(match.group(1)), float(match.group(2))
+    if low <= 0 or high <= 0:
+        return None
+    return (min(low, high), max(low, high))
+
+
 def parse_compact_count(value: Any) -> int | None:
     if value is None:
         return None
@@ -87,9 +109,29 @@ def _safe_rating(value: Any) -> float | None:
     return rating if 0 <= rating <= 5 else None
 
 
+def _clean_location(value: Any, title: str = "") -> str | None:
+    if value in (None, ""):
+        return None
+    text = " ".join(str(value).split()).strip()
+    if not text or text.lower() == " ".join(title.lower().split()):
+        return None
+    if re.search(r"^(?:sponsored|iklan|ad|advertisement)$", text, re.I):
+        return None
+    if re.search(r"^RM\s*[0-9]", text, re.I):
+        return None
+    if re.search(r"(?:sold|terjual|reviews?|ratings|ulasan|penilaian)", text, re.I):
+        return None
+    if re.fullmatch(r"[0-5](?:\.[0-9])?", text):
+        return None
+    return text[:200]
+
+
 # A singular label such as "4.8 rating" normally describes the score, not a count.
 _REVIEW_PATTERNS = (
-    r"([0-9,.]+\s*[km]?)\s*(?:reviews?|ratings|ulasan|penilaian)\b",
+    r"([0-9,.]+\s*[km]?\s*\+?)\s*(?:reviews?|ratings|ulasan|penilaian)\b",
+)
+_SOLD_PATTERNS = (
+    r"([0-9,.]+\s*[km]?\s*\+?)\s*(?:sold|terjual)\b",
 )
 
 
@@ -112,8 +154,6 @@ class MarketplaceAdapter:
         if any(blocked in host for blocked in self.blocked_hosts):
             return True
 
-        # Avoid generic substring checks such as "verify": normal marketplace pages commonly
-        # contain text like "Verified Seller", which previously paused valid runs as captcha.
         path_signals = (
             "/verify", "/verification", "/captcha", "/punish", "/security-check",
             "/security_check", "/challenge",
@@ -157,21 +197,28 @@ class ShopeeMalaysiaAdapter(MarketplaceAdapter):
         return r"""() => Array.from(document.querySelectorAll('a[href*="-i."]')).map(a => {
           const card = a.closest('[data-sqe="item"]') || a.closest('li') || a.parentElement?.parentElement;
           const text = (card?.innerText || a.innerText || '').trim();
+          const lines = text.split('\n').map(x => x.trim()).filter(Boolean);
           const image = card?.querySelector('img');
           const href = a.href;
           const id = href.match(/-i\.(\d+)\.(\d+)/);
+          const title = a.getAttribute('aria-label') || a.title || lines[0] || '';
           const ratingNode = card?.querySelector('[aria-label*="rating" i], [aria-label*="star" i], [class*="rating" i]');
           const ratingText = (ratingNode?.getAttribute('aria-label') || ratingNode?.textContent || '').trim();
           const ratingArea = ratingNode ? (ratingNode.parentElement?.innerText || '') : '';
           const price = text.match(/RM\s*[0-9,.]+/i)?.[0] || null;
-          const sold = text.match(/[0-9,.]+\s*[km]?\s*(?:sold|terjual)/i)?.[0] || null;
-          const reviews = ratingArea.match(/\(([0-9,.]+\s*[km]?)\)/)?.[1]
-            || text.match(/([0-9,.]+\s*[km]?)\s*(?:reviews?|ratings|ulasan|penilaian)\b/i)?.[1] || null;
+          const sold = text.match(/[0-9,.]+\s*[km]?\s*\+?\s*(?:sold|terjual)\b/i)?.[0] || null;
+          const reviews = ratingArea.match(/\(([0-9,.]+\s*[km]?\s*\+?)\)/)?.[1]
+            || text.match(/([0-9,.]+\s*[km]?\s*\+?)\s*(?:reviews?|ratings|ulasan|penilaian)\b/i)?.[1] || null;
           const rating = ratingText.match(/\b[0-5](?:\.[0-9])?\b/)?.[0]
             || text.match(/(?:rating|rated|bintang)\s*[:\-]?\s*([0-5](?:\.[0-9])?)/i)?.[1] || null;
-          return {href, text, title: a.getAttribute('aria-label') || a.title || text.split('\n')[0],
+          const location = [...lines].reverse().find(line => line !== title
+            && !/^(?:sponsored|iklan|ad|advertisement)$/i.test(line)
+            && !/^RM\s*[0-9]/i.test(line)
+            && !/(?:sold|terjual|reviews?|ratings|ulasan|penilaian)/i.test(line)
+            && !/^[0-5](?:\.[0-9])?$/.test(line)) || null;
+          return {href, text, title,
             image: image?.currentSrc || image?.src || null, price, sold, rating, reviews,
-            seller: null, location: text.split('\n').slice(-1)[0] || null,
+            seller: null, location,
             sponsored: /sponsored|iklan/i.test(text), shop_id: id?.[1] || null, item_id: id?.[2] || null};
         })"""
 
@@ -188,9 +235,13 @@ class ShopeeMalaysiaAdapter(MarketplaceAdapter):
             title = next((line for line in lines if not re.match(r"^(RM|[0-9.]+\s*(sold|terjual))", line, re.I)), "")
         if not title:
             return None
-        sold_text = raw.get("sold") or _first_match((r"([0-9,.]+\s*[km]?)\s*(?:sold|terjual)",), text)
+        sold_text = raw.get("sold") or _first_match(_SOLD_PATTERNS, text)
         review_text = raw.get("reviews") or _first_match(_REVIEW_PATTERNS, text)
-        price = parse_money(raw.get("price")) if raw.get("price") else parse_money(text, require_currency=True)
+        # A visible variant range such as RM 10 - RM 20 has no single comparable unit price.
+        # Using only the minimum systematically made these products look cheaper than peers.
+        price = None if parse_money_range(text) else (
+            parse_money(raw.get("price")) if raw.get("price") else parse_money(text, require_currency=True)
+        )
         return MarketplaceListing(
             platform=self.platform,
             item_id=item_id,
@@ -203,7 +254,7 @@ class ShopeeMalaysiaAdapter(MarketplaceAdapter):
             rating=_safe_rating(raw.get("rating")),
             review_count=parse_compact_count(review_text),
             seller_name=raw.get("seller"),
-            seller_location=raw.get("location"),
+            seller_location=_clean_location(raw.get("location"), title),
             is_sponsored=bool(raw.get("sponsored")) if raw.get("sponsored") is not None else None,
             search_rank=rank,
             data_quality=_quality(raw),
@@ -223,22 +274,30 @@ class LazadaMalaysiaAdapter(MarketplaceAdapter):
         return r"""() => Array.from(document.querySelectorAll('a[href*="/products/"]')).map(a => {
           const card = a.closest('[data-item-id]') || a.closest('[class*="Bm3ON"]') || a.closest('div[data-qa-locator="product-item"]') || a.parentElement?.parentElement;
           const text = (card?.innerText || a.innerText || '').trim();
+          const lines = text.split('\n').map(x => x.trim()).filter(Boolean);
           const image = card?.querySelector('img');
           const href = a.href;
           const itemId = card?.getAttribute('data-item-id') || href.match(/-i(\d+)-/i)?.[1] || href.match(/\/products\/[^/]*-(\d+)\.html/i)?.[1];
+          const title = a.title || a.getAttribute('aria-label') || lines[0] || '';
           const ratingNode = card?.querySelector('[aria-label*="rating" i], [aria-label*="star" i], [class*="rating" i]');
           const ratingText = (ratingNode?.getAttribute('aria-label') || ratingNode?.textContent || '').trim();
           const ratingArea = ratingNode ? (ratingNode.parentElement?.innerText || '') : '';
-          return {href, text, title: a.title || a.getAttribute('aria-label') || text.split('\n')[0],
+          const prices = Array.from(text.matchAll(/RM\s*[0-9,.]+/ig));
+          const location = [...lines].reverse().find(line => line !== title
+            && !/^(?:sponsored|iklan|ad|advertisement)$/i.test(line)
+            && !/^RM\s*[0-9]/i.test(line)
+            && !/(?:sold|terjual|reviews?|ratings|ulasan|penilaian)/i.test(line)
+            && !/^[0-5](?:\.[0-9])?$/.test(line)) || null;
+          return {href, text, title,
             image: image?.currentSrc || image?.src || null,
-            price: text.match(/RM\s*[0-9,.]+/i)?.[0] || null,
-            original_price: Array.from(text.matchAll(/RM\s*[0-9,.]+/ig))[1]?.[0] || null,
-            sold: text.match(/[0-9,.]+\s*[km]?\s*(?:sold|terjual)/i)?.[0] || null,
+            price: prices[0]?.[0] || null,
+            original_price: prices[1]?.[0] || null,
+            sold: text.match(/[0-9,.]+\s*[km]?\s*\+?\s*(?:sold|terjual)\b/i)?.[0] || null,
             rating: ratingText.match(/\b[0-5](?:\.[0-9])?\b/)?.[0]
               || text.match(/(?:rating|rated|bintang)\s*[:\-]?\s*([0-5](?:\.[0-9])?)/i)?.[1] || null,
-            reviews: ratingArea.match(/\(([0-9,.]+\s*[km]?)\)/)?.[1]
-              || text.match(/([0-9,.]+\s*[km]?)\s*(?:reviews?|ratings|ulasan|penilaian)\b/i)?.[1] || null,
-            seller: null, location: text.split('\n').slice(-1)[0] || null,
+            reviews: ratingArea.match(/\(([0-9,.]+\s*[km]?\s*\+?)\)/)?.[1]
+              || text.match(/([0-9,.]+\s*[km]?\s*\+?)\s*(?:reviews?|ratings|ulasan|penilaian)\b/i)?.[1] || null,
+            seller: null, location,
             sponsored: /sponsored|iklan/i.test(text), item_id: itemId || null, shop_id: null};
         })"""
 
@@ -257,10 +316,16 @@ class LazadaMalaysiaAdapter(MarketplaceAdapter):
             title = next((line for line in lines if not line.lower().startswith("rm")), "")
         if not title:
             return None
-        price = parse_money(raw.get("price")) if raw.get("price") else parse_money(text, require_currency=True)
+        # A Lazada range is a variant price range; separate current/original prices are usually
+        # on independent lines and therefore are not matched by parse_money_range().
+        price = None if parse_money_range(text) else (
+            parse_money(raw.get("price")) if raw.get("price") else parse_money(text, require_currency=True)
+        )
         original = parse_money(raw.get("original_price"))
+        if original is not None and price is not None and original <= price:
+            original = None
         discount = round((original - price) / original * 100, 1) if original and price and original > price else None
-        sold_text = raw.get("sold") or _first_match((r"([0-9,.]+\s*[km]?)\s*(?:sold|terjual)",), text)
+        sold_text = raw.get("sold") or _first_match(_SOLD_PATTERNS, text)
         review_text = raw.get("reviews") or _first_match(_REVIEW_PATTERNS, text)
         return MarketplaceListing(
             platform=self.platform,
@@ -276,7 +341,7 @@ class LazadaMalaysiaAdapter(MarketplaceAdapter):
             rating=_safe_rating(raw.get("rating")),
             review_count=parse_compact_count(review_text),
             seller_name=raw.get("seller"),
-            seller_location=raw.get("location"),
+            seller_location=_clean_location(raw.get("location"), title),
             is_sponsored=bool(raw.get("sponsored")) if raw.get("sponsored") is not None else None,
             search_rank=rank,
             data_quality=_quality(raw),

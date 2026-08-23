@@ -120,6 +120,7 @@ def _looks_like_bundle(keyword: str, title: str) -> bool:
         return False
 
     normalized = _normalized_text(title)
+    raw_title = title.lower()
     if not normalized:
         return False
 
@@ -127,9 +128,15 @@ def _looks_like_bundle(keyword: str, title: str) -> bool:
         return True
     if re.search(r"\b\d+\s*(?:pcs|pieces|pack)\b", normalized):
         return True
+    if "unit" not in query_tokens and "units" not in query_tokens and re.search(r"\b\d+\s*units?\b", normalized):
+        return True
     if re.search(r"\b(?:set|pack)\s+of\s+\d+\b", normalized):
         return True
     if re.search(r"\b\d+\s*x\s+", normalized):
+        return True
+    if re.search(r"\b\d+\s*\+\s*\d+\b", raw_title):
+        return True
+    if re.search(r"\bbuy\s+\d+\s+(?:get\s+)?(?:\d+\s+)?free(?:\s+\d+)?\b", raw_title):
         return True
     return False
 
@@ -198,7 +205,7 @@ def _coverage(items: list[dict[str, Any]], field: str) -> float:
 
 
 def _weighted_with_neutral(parts: list[tuple[float | None, float]]) -> tuple[float | None, float]:
-    available = [(value, weight) for value, weight in parts if value is not None]
+    available = [(value, weight) for value, weight in parts if value is not None and weight > 0]
     if not available:
         return None, 0.0
     known_weight = sum(weight for _, weight in available)
@@ -303,9 +310,6 @@ def _seller_structure(items: list[dict[str, Any]]) -> dict[str, Any]:
             top5_demand_share = sum(sorted(sold_by_seller.values(), reverse=True)[:5]) / total_sold * 100
             demand_hhi = _normalized_hhi(list(sold_by_seller.values()))
 
-    # Top-5 shares are useful descriptive metrics, but they have a large mechanical floor
-    # in small samples (five distinct sellers imply Top5=100%). Normalized HHI removes that
-    # floor: equal-sized sellers score 0 regardless of seller count; monopoly scores 100.
     concentration_pressure = demand_hhi if demand_hhi is not None else listing_hhi
     return {
         "coverage": coverage,
@@ -377,12 +381,13 @@ def score_platform(
 
     seller = _seller_structure(items)
     seller_pressure = seller["concentration_pressure"]
+    seller_weight = 0.30 * float(seller["reliability"])
     barrier, barrier_reliability = _weighted_with_neutral(
         [
             (review_barrier, 0.35),
             (strong_incumbent_share, 0.20),
             (sponsored_share, 0.15),
-            (seller_pressure, 0.30),
+            (seller_pressure, seller_weight),
         ]
     )
     entry_ease = 100 - barrier if barrier is not None else None
@@ -451,6 +456,7 @@ def score_platform(
             "average_rating": round(_mean(ratings), 2) if ratings else None,
             "sponsored_share": round(sponsored_share, 1) if sponsored_share is not None else None,
             "seller_identity_coverage": round(seller["coverage"] * 100, 1),
+            "seller_evidence_reliability": round(float(seller["reliability"]) * 100, 1),
             "seller_count": seller["seller_count"],
             "top5_seller_listing_share": (
                 round(seller["top5_listing_share"], 1)
@@ -561,8 +567,6 @@ def build_opportunity_segments(
 
         platform_coverage = len(eligible_scores) / platform_total
         mean_score = statistics.mean(float(result["score"]) for result in eligible_scores)
-        # A segment observed on only one selected platform remains useful, but is ranked a
-        # little below equally strong segments corroborated across platforms.
         ranked_score = _clamp(mean_score * (0.90 + 0.10 * platform_coverage))
         confidence = statistics.mean(float(result["confidence"]) for result in eligible_scores)
         median_prices = [
@@ -574,6 +578,7 @@ def build_opportunity_segments(
             result["metrics"]["seller_concentration"]
             for result in eligible_scores
             if result["metrics"]["seller_concentration"] is not None
+            and (result["metrics"].get("seller_evidence_reliability") or 0) >= 75
         ]
 
         segments.append({
@@ -646,8 +651,12 @@ def build_analysis(keyword: str, by_platform: dict[str, list[dict[str, Any]]]) -
             recommendations.append("头部商品评论门槛较高，新商品需要更明确的卖点与首批评价策略。")
         if any((x["metrics"]["sponsored_share"] or 0) >= 35 for x in eligible):
             recommendations.append("搜索结果广告占比较高，进入时应把站内推广成本纳入验证预算。")
-        if any((x["metrics"]["seller_concentration"] or 0) >= 65 for x in eligible):
-            recommendations.append("可识别卖家中的头部集中度较高，需求可能被少数强店铺占据；不要只看销量高就判断容易进入。")
+        if any(
+            (x["metrics"]["seller_concentration"] or 0) >= 65
+            and (x["metrics"].get("seller_evidence_reliability") or 0) >= 75
+            for x in eligible
+        ):
+            recommendations.append("可识别卖家中的头部集中度较高，且卖家身份覆盖足够；需求可能被少数强店铺占据，不要只看销量高就判断容易进入。")
         if any((x["metrics"]["price_dispersion"] or 0) > 0.6 for x in eligible):
             recommendations.append("价格分布非常分散，可能混有规格/子品类差异；优先参考下面的商品族机会排序。")
 
@@ -690,7 +699,7 @@ def build_analysis(keyword: str, by_platform: dict[str, list[dict[str, Any]]]) -
         "methodology": (
             "公开数据启发式评分：需求信号 40%、进入门槛 35%、价格空间 25%。"
             "进入门槛同时考虑评论门槛、强势商品、广告压力和可识别卖家集中度；"
-            "卖家集中度使用归一化 HHI，避免小样本 Top5 占比天然偏高造成误判；"
+            "卖家集中度使用归一化 HHI，并按卖家身份覆盖可靠度衰减权重，避免部分可识别样本过度影响结论；"
             "缺失证据不会被剩余字段放大，而会向中性分收缩。"
             "配件/替换件、明显多件装和低相关搜索漂移会从评分样本中排除；"
             "商品族排序来自重复标题属性的轻量聚类，用于缩小验证范围，不等同于平台官方类目。"
