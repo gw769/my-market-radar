@@ -13,6 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 BACKEND = ROOT / "backend"
+HOST = "127.0.0.1"
 PORT = 8011
 
 
@@ -31,7 +32,7 @@ def python_executable() -> str:
 
 def port_ready() -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        return sock.connect_ex(("127.0.0.1", PORT)) == 0
+        return sock.connect_ex((HOST, PORT)) == 0
 
 
 def open_when_ready() -> None:
@@ -61,10 +62,10 @@ def main() -> int:
     env["PYTHONPATH"] = str(BACKEND)
     command = [
         python_executable(), "-m", "uvicorn", "app.main:app",
-        "--host", "0.0.0.0", "--port", str(PORT),
+        "--host", HOST, "--port", str(PORT),
     ]
     print("MY Market Radar 正在启动…")
-    print(f"地址：http://localhost:{PORT}")
+    print(f"地址：http://localhost:{PORT}（仅本机）")
     print("账号：admin@market.my / admin123")
     threading.Thread(target=open_when_ready, daemon=True).start()
     process = subprocess.Popen(command, cwd=BACKEND, env=env)
