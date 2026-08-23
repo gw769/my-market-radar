@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import re
 import statistics
+from collections import Counter, defaultdict
 from typing import Any
 
 
@@ -15,6 +16,23 @@ ACCESSORY_TERMS = {
 }
 BUNDLE_TERMS = {"bundle", "combo", "set", "pack", "pcs", "piece", "pieces"}
 INCLUSION_CONNECTORS = {"with", "dengan", "including", "include", "includes", "plus"}
+
+# Common marketplace filler words are poor product-family labels. The list is deliberately
+# conservative; unknown tokens are still allowed to form a segment when repeated often.
+SEGMENT_STOPWORDS = {
+    "new", "original", "ready", "stock", "sale", "hot", "best", "quality", "premium",
+    "free", "shipping", "murah", "terbaik", "baru", "malaysia", "my", "for", "with",
+    "and", "the", "of", "in", "to", "from", "oleh", "untuk", "dengan", "dan",
+    "warna", "colour", "color", "random", "official", "authentic", "brand",
+}
+SEGMENT_ATTRIBUTE_TERMS = {
+    "stainless", "steel", "glass", "plastic", "tritan", "silicone", "ceramic", "wood",
+    "thermal", "insulated", "vacuum", "electric", "manual", "wireless", "rechargeable",
+    "portable", "foldable", "mini", "compact", "large", "small", "lightweight",
+    "kids", "kid", "children", "child", "baby", "toddler", "adult", "men", "women",
+    "sports", "sport", "gym", "outdoor", "hiking", "travel", "office", "home",
+    "straw", "handle", "waterproof", "organic", "natural", "digital", "smart",
+}
 
 
 def _mean(values: list[float]) -> float | None:
@@ -68,7 +86,7 @@ def _looks_like_accessory(keyword: str, title: str) -> bool:
     if not title_tokens or not query_tokens:
         return False
 
-    if (f" for {query}" in f" {normalized}" or f" untuk {query}" in f" {normalized}"):
+    if f" for {query}" in f" {normalized}" or f" untuk {query}" in f" {normalized}":
         return True
 
     first_window = set(title_tokens[:4])
@@ -126,7 +144,6 @@ def relevance_score(keyword: str, title: str) -> float:
         return 0.2
     if _looks_like_bundle(keyword, title):
         return 0.55
-
     if keyword in title:
         return 1.0
 
@@ -212,6 +229,71 @@ def _price_room(prices: list[float]) -> tuple[float | None, float | None]:
     return _clamp(score), dispersion
 
 
+def _seller_identity(item: dict[str, Any]) -> str | None:
+    shop_id = str(item.get("shop_id") or "").strip()
+    if shop_id:
+        return f"id:{shop_id}"
+    seller = " ".join(str(item.get("seller_name") or "").lower().split())
+    if seller and seller not in {"unknown", "n/a", "na", "-", "—"}:
+        return f"name:{seller}"
+    return None
+
+
+def _seller_structure(items: list[dict[str, Any]]) -> dict[str, Any]:
+    if not items:
+        return {
+            "coverage": 0.0,
+            "seller_count": None,
+            "top5_listing_share": None,
+            "top5_demand_share": None,
+            "concentration_pressure": None,
+            "reliability": 0.0,
+        }
+
+    identified = [(identity, item) for item in items if (identity := _seller_identity(item))]
+    coverage = len(identified) / len(items)
+    if coverage < 0.5 or len(identified) < 5:
+        return {
+            "coverage": coverage,
+            "seller_count": len({identity for identity, _ in identified}) or None,
+            "top5_listing_share": None,
+            "top5_demand_share": None,
+            "concentration_pressure": None,
+            "reliability": min(1.0, coverage / 0.8),
+        }
+
+    listing_counts = Counter(identity for identity, _ in identified)
+    top5_listing_share = sum(count for _, count in listing_counts.most_common(5)) / len(identified) * 100
+
+    sold_rows = [
+        (identity, float(item["sold_count"]))
+        for identity, item in identified
+        if item.get("sold_count") is not None and float(item["sold_count"]) >= 0
+    ]
+    sold_coverage = len(sold_rows) / len(identified)
+    top5_demand_share = None
+    if sold_coverage >= 0.5:
+        sold_by_seller: dict[str, float] = defaultdict(float)
+        for identity, sold_count in sold_rows:
+            sold_by_seller[identity] += sold_count
+        total_sold = sum(sold_by_seller.values())
+        if total_sold > 0:
+            top5_demand_share = sum(sorted(sold_by_seller.values(), reverse=True)[:5]) / total_sold * 100
+
+    concentration_share = top5_demand_share if top5_demand_share is not None else top5_listing_share
+    # With 20 distinct sellers the top five naturally account for 25%. Treat that as the
+    # baseline and only penalize concentration above it.
+    concentration_pressure = _clamp((concentration_share - 25) / 55 * 100)
+    return {
+        "coverage": coverage,
+        "seller_count": len(listing_counts),
+        "top5_listing_share": top5_listing_share,
+        "top5_demand_share": top5_demand_share,
+        "concentration_pressure": concentration_pressure,
+        "reliability": min(1.0, coverage / 0.8),
+    }
+
+
 def _verdict(score: float | None, eligible: bool = True) -> str:
     if score is None or not eligible:
         return "数据不足"
@@ -222,11 +304,16 @@ def _verdict(score: float | None, eligible: bool = True) -> str:
     return "暂不建议"
 
 
-def score_platform(items: list[dict[str, Any]], keyword: str | None = None) -> dict[str, Any]:
+def score_platform(
+    items: list[dict[str, Any]],
+    keyword: str | None = None,
+    min_sample_size: int = 10,
+) -> dict[str, Any]:
     raw_sample_size = len(items)
     items, exclusion_breakdown = _relevant_items(items, keyword)
     excluded_irrelevant = sum(exclusion_breakdown.values())
     sample_size = len(items)
+
     prices = [float(x["price"]) for x in items if x.get("price") is not None and float(x["price"]) > 0]
     sold = [float(x["sold_count"]) for x in items if x.get("sold_count") is not None]
     reviews = [float(x["review_count"]) for x in items if x.get("review_count") is not None]
@@ -262,8 +349,16 @@ def score_platform(items: list[dict[str, Any]], keyword: str | None = None) -> d
         if known_ads and coverage["is_sponsored"] >= 0.5
         else None
     )
+
+    seller = _seller_structure(items)
+    seller_pressure = seller["concentration_pressure"]
     barrier, barrier_reliability = _weighted_with_neutral(
-        [(review_barrier, 0.5), (strong_incumbent_share, 0.3), (sponsored_share, 0.2)]
+        [
+            (review_barrier, 0.35),
+            (strong_incumbent_share, 0.20),
+            (sponsored_share, 0.15),
+            (seller_pressure, 0.30),
+        ]
     )
     entry_ease = 100 - barrier if barrier is not None else None
 
@@ -280,7 +375,7 @@ def score_platform(items: list[dict[str, Any]], keyword: str | None = None) -> d
     )
 
     field_coverage = statistics.mean(coverage.values()) if coverage else 0.0
-    sample_coverage = min(1.0, sample_size / 20)
+    sample_coverage = min(1.0, sample_size / max(20, min_sample_size))
     relevance_coverage = sample_size / raw_sample_size if raw_sample_size else 0.0
     confidence = round(
         (
@@ -294,8 +389,8 @@ def score_platform(items: list[dict[str, Any]], keyword: str | None = None) -> d
     )
 
     eligibility_reasons: list[str] = []
-    if sample_size < 10:
-        eligibility_reasons.append("相关商品样本少于 10 条")
+    if sample_size < min_sample_size:
+        eligibility_reasons.append(f"相关商品样本少于 {min_sample_size} 条")
     if coverage["price"] < 0.5:
         eligibility_reasons.append("价格字段覆盖不足 50%")
     if demand_reliability < 0.5:
@@ -330,8 +425,148 @@ def score_platform(items: list[dict[str, Any]], keyword: str | None = None) -> d
             "median_reviews": int(median_reviews) if median_reviews is not None else None,
             "average_rating": round(_mean(ratings), 2) if ratings else None,
             "sponsored_share": round(sponsored_share, 1) if sponsored_share is not None else None,
+            "seller_identity_coverage": round(seller["coverage"] * 100, 1),
+            "seller_count": seller["seller_count"],
+            "top5_seller_listing_share": (
+                round(seller["top5_listing_share"], 1)
+                if seller["top5_listing_share"] is not None else None
+            ),
+            "top5_seller_demand_share": (
+                round(seller["top5_demand_share"], 1)
+                if seller["top5_demand_share"] is not None else None
+            ),
+            "seller_concentration": (
+                round(seller_pressure, 1) if seller_pressure is not None else None
+            ),
         },
     }
+
+
+def _segment_feature_tokens(title: str, keyword: str) -> set[str]:
+    query_tokens = set(_tokens(keyword))
+    features: set[str] = set()
+    for token in _tokens(title):
+        if token in query_tokens or token in SEGMENT_STOPWORDS:
+            continue
+        if token in ACCESSORY_TERMS or token in BUNDLE_TERMS:
+            continue
+        if len(token) <= 2 and _is_ascii_word(token):
+            continue
+        if re.fullmatch(r"\d+(?:ml|l|oz|cm|mm|kg|g|w|v)?", token):
+            continue
+        features.add(token)
+    return features
+
+
+def _segment_candidates(keyword: str, items: list[dict[str, Any]]) -> list[str]:
+    if len(items) < 6:
+        return []
+    document_frequency: Counter[str] = Counter()
+    for item in items:
+        document_frequency.update(_segment_feature_tokens(str(item.get("title") or ""), keyword))
+
+    minimum = max(2, math.ceil(len(items) * 0.12))
+    maximum = max(minimum, math.floor(len(items) * 0.75))
+    candidates = [
+        token for token, count in document_frequency.items()
+        if minimum <= count <= maximum
+    ]
+    candidates.sort(
+        key=lambda token: (
+            token in SEGMENT_ATTRIBUTE_TERMS,
+            document_frequency[token],
+            len(token),
+        ),
+        reverse=True,
+    )
+    return candidates[:8]
+
+
+def build_opportunity_segments(
+    keyword: str,
+    by_platform: dict[str, list[dict[str, Any]]],
+    min_segment_size: int = 4,
+) -> list[dict[str, Any]]:
+    relevant_by_platform: dict[str, list[dict[str, Any]]] = {}
+    combined: list[dict[str, Any]] = []
+    for platform, items in by_platform.items():
+        relevant, _ = _relevant_items(items, keyword)
+        relevant_by_platform[platform] = relevant
+        combined.extend(relevant)
+
+    candidates = _segment_candidates(keyword, combined)
+    if not candidates:
+        return []
+
+    assigned: dict[str, dict[str, list[dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
+    representatives: dict[str, list[str]] = defaultdict(list)
+    for platform, items in relevant_by_platform.items():
+        for item in items:
+            features = _segment_feature_tokens(str(item.get("title") or ""), keyword)
+            label = next((candidate for candidate in candidates if candidate in features), "core")
+            assigned[label][platform].append(item)
+            if len(representatives[label]) < 2:
+                representatives[label].append(str(item.get("title") or "")[:140])
+
+    segments: list[dict[str, Any]] = []
+    platform_total = max(1, len(by_platform))
+    total_relevant = max(1, len(combined))
+    for label, platform_items in assigned.items():
+        sample_size = sum(len(items) for items in platform_items.values())
+        if sample_size < min_segment_size:
+            continue
+
+        platform_scores: dict[str, dict[str, Any]] = {}
+        eligible_scores: list[dict[str, Any]] = []
+        for platform, items in platform_items.items():
+            if len(items) < min_segment_size:
+                continue
+            result = score_platform(items, keyword=None, min_sample_size=min_segment_size)
+            platform_scores[platform] = result
+            if result["eligible"]:
+                eligible_scores.append(result)
+        if not eligible_scores:
+            continue
+
+        platform_coverage = len(eligible_scores) / platform_total
+        mean_score = statistics.mean(float(result["score"]) for result in eligible_scores)
+        # A segment observed on only one selected platform remains useful, but is ranked a
+        # little below equally strong segments corroborated across platforms.
+        ranked_score = _clamp(mean_score * (0.90 + 0.10 * platform_coverage))
+        confidence = statistics.mean(float(result["confidence"]) for result in eligible_scores)
+        median_prices = [
+            result["metrics"]["median_price"]
+            for result in eligible_scores
+            if result["metrics"]["median_price"] is not None
+        ]
+        seller_pressures = [
+            result["metrics"]["seller_concentration"]
+            for result in eligible_scores
+            if result["metrics"]["seller_concentration"] is not None
+        ]
+
+        segments.append({
+            "label": "核心商品" if label == "core" else label,
+            "token": None if label == "core" else label,
+            "opportunity_score": round(ranked_score, 1),
+            "verdict": _verdict(ranked_score, True),
+            "confidence": round(confidence, 1),
+            "sample_size": sample_size,
+            "share": round(sample_size / total_relevant * 100, 1),
+            "platform_coverage": round(platform_coverage * 100, 1),
+            "median_price": round(statistics.mean(median_prices), 2) if median_prices else None,
+            "seller_concentration": (
+                round(statistics.mean(seller_pressures), 1) if seller_pressures else None
+            ),
+            "representative_titles": representatives[label],
+            "platform_scores": platform_scores,
+        })
+
+    segments.sort(
+        key=lambda item: (item["opportunity_score"], item["confidence"], item["sample_size"]),
+        reverse=True,
+    )
+    return segments[:5]
 
 
 def build_analysis(keyword: str, by_platform: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
@@ -353,6 +588,7 @@ def build_analysis(keyword: str, by_platform: dict[str, list[dict[str, Any]]]) -
         else 0
     )
     verdict = _verdict(combined_score, all_eligible)
+    opportunity_segments = build_opportunity_segments(keyword, by_platform)
 
     recommendations: list[str] = []
     if not all_eligible:
@@ -379,8 +615,18 @@ def build_analysis(keyword: str, by_platform: dict[str, list[dict[str, Any]]]) -
             recommendations.append("头部商品评论门槛较高，新商品需要更明确的卖点与首批评价策略。")
         if any((x["metrics"]["sponsored_share"] or 0) >= 35 for x in eligible):
             recommendations.append("搜索结果广告占比较高，进入时应把站内推广成本纳入验证预算。")
+        if any((x["metrics"]["seller_concentration"] or 0) >= 65 for x in eligible):
+            recommendations.append("可识别卖家中的头部集中度较高，需求可能被少数强店铺占据；不要只看销量高就判断容易进入。")
         if any((x["metrics"]["price_dispersion"] or 0) > 0.6 for x in eligible):
-            recommendations.append("价格分布非常分散，可能混有规格/套装差异；下单前应进一步拆分子品类验证。")
+            recommendations.append("价格分布非常分散，可能混有规格/子品类差异；优先参考下面的商品族机会排序。")
+
+    if opportunity_segments:
+        top = opportunity_segments[0]
+        recommendations.append(
+            f"自动拆分的商品族中，当前排序最高的是“{top['label']}”"
+            f"（机会分 {top['opportunity_score']}，样本 {top['sample_size']} 条，"
+            f"平台证据覆盖 {top['platform_coverage']}%）；建议先围绕这一子类做供应链和利润核算。"
+        )
 
     excluded_accessories = sum(
         x.get("exclusion_breakdown", {}).get("accessory", 0) for x in requested
@@ -408,11 +654,13 @@ def build_analysis(keyword: str, by_platform: dict[str, list[dict[str, Any]]]) -
         "verdict": verdict,
         "confidence": confidence,
         "platform_scores": platform_scores,
+        "opportunity_segments": opportunity_segments,
         "recommendations": recommendations,
         "methodology": (
             "公开数据启发式评分：需求信号 40%、进入门槛 35%、价格空间 25%。"
-            "缺失证据不会被剩余字段放大，而会向中性分收缩；"
+            "进入门槛同时考虑评论门槛、强势商品、广告压力和可识别卖家集中度；"
+            "缺失证据不会被剩余字段放大，而会向中性分收缩。"
             "配件/替换件、明显多件装和低相关搜索漂移会从评分样本中排除；"
-            "相关样本、字段覆盖和完整度不足时不输出强结论。"
+            "商品族排序来自重复标题属性的轻量聚类，用于缩小验证范围，不等同于平台官方类目。"
         ),
     }
