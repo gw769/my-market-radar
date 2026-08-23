@@ -9,7 +9,7 @@ import time
 import urllib.request
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote as urlquote
+from urllib.parse import quote as urlquote, urlparse
 
 from app.core.config import get_settings
 
@@ -165,18 +165,90 @@ def _platform_markers(platform: str) -> tuple[str, ...]:
     return ()
 
 
-def find_platform_tab(platform: str) -> dict[str, Any] | None:
+def _host_matches(host: str, marker: str) -> bool:
+    return host == marker or host.endswith(f".{marker}")
+
+
+def _parsed_tab_url(tab: dict[str, Any]):
+    try:
+        return urlparse(str(tab.get("url") or ""))
+    except ValueError:
+        return urlparse("")
+
+
+def _platform_tabs(platform: str) -> list[dict[str, Any]]:
     markers = _platform_markers(platform)
     if not markers:
+        return []
+    candidates: list[dict[str, Any]] = []
+    for tab in list_tabs():
+        if tab.get("type") != "page":
+            continue
+        parsed = _parsed_tab_url(tab)
+        host = (parsed.hostname or "").lower()
+        if any(_host_matches(host, marker) for marker in markers):
+            candidates.append(tab)
+    return candidates
+
+
+def _is_verification_tab(platform: str, tab: dict[str, Any]) -> bool:
+    parsed = _parsed_tab_url(tab)
+    host = (parsed.hostname or "").lower()
+    path_query = f"{parsed.path} {parsed.query}".lower()
+    if platform == "shopee" and _host_matches(host, "xiapibuy.com"):
+        return True
+    if platform == "lazada" and host.startswith("acs-m."):
+        return True
+    return any(
+        signal in path_query
+        for signal in (
+            "/verify",
+            "/verification",
+            "/captcha",
+            "/punish",
+            "/security-check",
+            "/security_check",
+            "/challenge",
+        )
+    )
+
+
+def _is_search_tab(platform: str, tab: dict[str, Any]) -> bool:
+    parsed = _parsed_tab_url(tab)
+    path = parsed.path.lower()
+    if platform == "shopee":
+        return path.startswith("/search")
+    if platform == "lazada":
+        return path.startswith("/catalog")
+    return False
+
+
+def _tab_priority(platform: str, tab: dict[str, Any], prefer_verification: bool) -> int:
+    verification = _is_verification_tab(platform, tab)
+    search = _is_search_tab(platform, tab)
+    if prefer_verification:
+        if verification:
+            return 300
+        if search:
+            return 200
+        return 100
+    if search:
+        return 300
+    if verification:
+        return 200
+    return 100
+
+
+def find_platform_tab(platform: str, prefer_verification: bool = True) -> dict[str, Any] | None:
+    candidates = _platform_tabs(platform)
+    if not candidates:
         return None
-    return next(
-        (
-            tab
-            for tab in list_tabs()
-            if tab.get("type") == "page"
-            and any(marker in str(tab.get("url", "")).lower() for marker in markers)
+    return max(
+        candidates,
+        key=lambda tab: (
+            _tab_priority(platform, tab, prefer_verification),
+            str(tab.get("id") or ""),
         ),
-        None,
     )
 
 
@@ -196,7 +268,7 @@ def new_tab(url: str) -> dict[str, Any] | None:
 
 def ensure_platform_tab(platform: str, url: str) -> dict[str, Any]:
     ensure_browser([url])
-    tab = find_platform_tab(platform)
+    tab = find_platform_tab(platform, prefer_verification=False)
     if tab:
         return tab
     tab = new_tab(url)
@@ -215,8 +287,8 @@ def activate_tab(tab_id: str) -> bool:
         return False
 
 
-def activate_platform_tab(platform: str) -> bool:
-    tab = find_platform_tab(platform)
+def activate_platform_tab(platform: str, prefer_verification: bool = True) -> bool:
+    tab = find_platform_tab(platform, prefer_verification=prefer_verification)
     return bool(tab and activate_tab(str(tab.get("id") or "")))
 
 
