@@ -38,6 +38,17 @@ if not _frontend_out.exists():
     _frontend_out = _project_root / "frontend" / "dist"
 
 
+def _safe_frontend_path(relative_path: str) -> Path | None:
+    """Resolve a SPA/static fallback path without allowing it to escape frontend/dist."""
+    try:
+        base = _frontend_out.resolve()
+        candidate = (_frontend_out / relative_path).resolve()
+        candidate.relative_to(base)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return candidate
+
+
 def _validate_runtime_security() -> None:
     secret = settings.SECRET_KEY.strip()
     if secret in KNOWN_INSECURE_SECRET_KEYS or len(secret) < 32:
@@ -167,17 +178,17 @@ if _frontend_out.exists():
             return JSONResponse({"error": "Not found"}, status_code=404)
 
         if full_path.startswith("assets/"):
-            file_path = _frontend_out / full_path
-            if file_path.is_file():
+            file_path = _safe_frontend_path(full_path)
+            if file_path and file_path.is_file():
                 return FileResponse(str(file_path))
             return JSONResponse({"error": "Not found"}, status_code=404)
 
-        file_path = _frontend_out / full_path
-        if file_path.is_file():
+        file_path = _safe_frontend_path(full_path)
+        if file_path and file_path.is_file():
             return FileResponse(str(file_path))
 
-        html_path = _frontend_out / f"{full_path}.html"
-        if html_path.exists():
+        html_path = _safe_frontend_path(f"{full_path}.html")
+        if html_path and html_path.is_file():
             return FileResponse(str(html_path))
 
         return FileResponse(str(_frontend_out / "index.html"))
