@@ -1,5 +1,5 @@
 @echo off
-setlocal EnableDelayedExpansion
+setlocal
 cd /d "%~dp0"
 
 echo ================================================================
@@ -19,32 +19,19 @@ if not exist ".env" (
 )
 echo [OK] .env found.
 
-set "bootstrap_password="
-set "bootstrap_email=admin@market.my"
-set "secret_key="
-for /f "usebackq tokens=1,* delims==" %%A in (".env") do (
-    if /I "%%A"=="BOOTSTRAP_ADMIN_PASSWORD" set "bootstrap_password=%%B"
-    if /I "%%A"=="BOOTSTRAP_ADMIN_EMAIL" set "bootstrap_email=%%B"
-    if /I "%%A"=="SECRET_KEY" set "secret_key=%%B"
-)
-if not defined bootstrap_password (
-    echo [ERROR] BOOTSTRAP_ADMIN_PASSWORD is empty in .env.
-    echo   Set a private password for the first administrator account.
+REM Validate secrets in PowerShell so strong passwords containing !, %, ^, &, = etc. are not
+REM mangled by cmd.exe delayed expansion / token parsing.
+powershell -NoProfile -Command ^
+  "$cfg=@{}; Get-Content -LiteralPath '.env' | ForEach-Object { $line=$_.Trim(); if($line -and -not $line.StartsWith('#') -and $line.Contains('=')){ $p=$line.Split('=',2); $cfg[$p[0].Trim()]=$p[1] } };" ^
+  "if([string]::IsNullOrWhiteSpace($cfg['BOOTSTRAP_ADMIN_PASSWORD'])){ Write-Host '[ERROR] BOOTSTRAP_ADMIN_PASSWORD is empty in .env.'; exit 1 };" ^
+  "if([string]::IsNullOrWhiteSpace($cfg['SECRET_KEY'])){ Write-Host '[ERROR] SECRET_KEY is empty in .env.'; exit 1 };" ^
+  "if($cfg['SECRET_KEY'] -eq 'please-change-me-to-a-random-32-char-string'){ Write-Host '[ERROR] SECRET_KEY still uses the template value.'; exit 1 };" ^
+  "exit 0"
+if errorlevel 1 (
+    echo   Fix .env before starting Docker.
     pause
     exit /b 1
 )
-if not defined secret_key (
-    echo [ERROR] SECRET_KEY is empty in .env.
-    pause
-    exit /b 1
-)
-if /I "!secret_key!"=="please-change-me-to-a-random-32-char-string" (
-    echo [ERROR] SECRET_KEY still uses the template value.
-    echo   Replace it with a random private string before starting Docker.
-    pause
-    exit /b 1
-)
-
 echo [OK] Bootstrap credentials and secret are configured.
 
 where docker >nul 2>&1
@@ -83,11 +70,11 @@ timeout /t 5 /nobreak >nul
 set /a tries+=1
 powershell -Command "try { $r = Invoke-WebRequest -Uri 'http://localhost:8011/health' -UseBasicParsing -TimeoutSec 3; if ($r.StatusCode -eq 200) { exit 0 } else { exit 1 } } catch { exit 1 }" >nul 2>&1
 if errorlevel 1 (
-    if !tries! geq 60 (
+    if %tries% geq 60 (
         echo [WARN] Backend not ready after 5 min. Please inspect: docker logs my-market-radar
         goto opendone
     )
-    echo [INFO] Backend starting, retrying (!tries!)...
+    echo [INFO] Backend starting, retrying (%tries%)...
     goto waitloop
 )
 echo [OK] Backend is ready.
@@ -105,7 +92,7 @@ echo.
 echo ================================================================
 echo   SERVICE IS RUNNING
  echo   Open:  http://localhost:8011
- echo   Login: !bootstrap_email! / ^(password from .env^)
+ echo   Login: BOOTSTRAP_ADMIN_EMAIL / BOOTSTRAP_ADMIN_PASSWORD from .env
  echo   Stop:  double-click stop_docker.bat
  echo   Network: localhost only by default
  echo ================================================================
