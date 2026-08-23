@@ -1,66 +1,55 @@
 @echo off
-setlocal enabledelayedexpansion
+setlocal
 cd /d "%~dp0"
 title Stop MY Market Radar
 
 echo.
 echo ================================================================
-echo   Stopping all MY Market Radar services...
+echo   Stopping MY Market Radar local services...
 echo ================================================================
 echo.
 
-set "stopped=0"
-
-REM 1. Stop launcher window (start.py + uvicorn child process)
-echo [INFO] Stopping launcher (start.py)...
+REM 1. Stop the normal start_local.bat launcher tree first.
+echo [INFO] Stopping launcher window if it is running...
 taskkill /F /T /FI "WINDOWTITLE eq MY Market Radar*" >nul 2>&1
-timeout /t 1 >nul
+timeout /t 1 /nobreak >nul
 
-REM 2. Kill backend API on project port 8011
-echo [INFO] Checking port 8011 (Backend)...
-for /f "tokens=5" %%a in ('netstat -ano -p tcp 2^>nul ^| findstr ":8011.*LISTENING"') do (
-    echo   - Found process on port 8011: PID %%a
-    taskkill /F /T /PID %%a >nul 2>&1
-    if !errorlevel! equ 0 (
-        echo   -^> Killed PID %%a successfully
-        set /a stopped+=1
-    ) else (
-        echo   -^> Failed to kill PID %%a
-    )
-)
+REM 2. Only stop port 8011 when the owning command line can be identified as this app.
+REM Docker Desktop or another unrelated service can also own a TCP listener; never kill it by port alone.
+echo [INFO] Checking port 8011 (local backend)...
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$connections=@(Get-NetTCPConnection -State Listen -LocalPort 8011 -ErrorAction SilentlyContinue);" ^
+  "if(-not $connections){ Write-Host '  - No listener on 8011.'; exit 0 };" ^
+  "foreach($c in $connections){" ^
+  "  $ownerPid=[int]$c.OwningProcess;" ^
+  "  $proc=Get-CimInstance Win32_Process -Filter ('ProcessId = ' + $ownerPid) -ErrorAction SilentlyContinue;" ^
+  "  $cmd=[string]$proc.CommandLine;" ^
+  "  if($cmd -match '(?i)(uvicorn.+app\.main:app|start\.py|my-market-radar)'){" ^
+  "    Write-Host ('  - Stopping confirmed project backend PID ' + $ownerPid);" ^
+  "    & taskkill /F /T /PID $ownerPid *> $null;" ^
+  "  } else {" ^
+  "    Write-Host ('  - WARNING: PID ' + $ownerPid + ' owns 8011 but is not identifiable as MY Market Radar. Leaving it untouched.');" ^
+  "    if($cmd){ Write-Host ('    Command: ' + $cmd) };" ^
+  "    Write-Host '    If this is the Docker deployment, use stop_docker.bat.';" ^
+  "  }" ^
+  "}"
 
-REM 3. Stop only the dedicated Chrome/Chromium exposing the project's isolated CDP port.
-REM Port 9231 is reserved for MY Market Radar, so this does not kill the user's normal browser.
-echo [INFO] Checking port 9231 (Project Chrome CDP)...
-for /f "tokens=5" %%a in ('netstat -ano -p tcp 2^>nul ^| findstr ":9231.*LISTENING"') do (
-    echo   - Found project browser on port 9231: PID %%a
-    taskkill /F /T /PID %%a >nul 2>&1
-    if !errorlevel! equ 0 (
-        echo   -^> Killed project browser PID %%a successfully
-        set /a stopped+=1
-    ) else (
-        echo   -^> Failed to kill project browser PID %%a
-    )
-)
+REM 3. Port 9231 is reserved by this project for the dedicated Chrome/Chromium CDP instance.
+echo [INFO] Checking port 9231 (project Chrome CDP)...
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$connections=@(Get-NetTCPConnection -State Listen -LocalPort 9231 -ErrorAction SilentlyContinue);" ^
+  "if(-not $connections){ Write-Host '  - No project Chrome listener on 9231.'; exit 0 };" ^
+  "foreach($c in $connections){ $ownerPid=[int]$c.OwningProcess; Write-Host ('  - Stopping project Chrome PID ' + $ownerPid); & taskkill /F /T /PID $ownerPid *> $null }"
 
-REM 4. Kill frontend dev server only if the developer started one separately.
-echo [INFO] Checking port 3000 (Frontend dev server)...
-for /f "tokens=5" %%a in ('netstat -ano -p tcp 2^>nul ^| findstr ":3000.*LISTENING"') do (
-    echo   - Found process on port 3000: PID %%a
-    taskkill /F /T /PID %%a >nul 2>&1
-    if !errorlevel! equ 0 (
-        echo   -^> Killed PID %%a successfully
-        set /a stopped+=1
-    )
-)
+REM 4. Port 3000 is commonly used by unrelated frontend projects. Never kill it automatically.
+echo [INFO] Checking port 3000 (optional frontend dev server)...
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$connections=@(Get-NetTCPConnection -State Listen -LocalPort 3000 -ErrorAction SilentlyContinue);" ^
+  "if($connections){ foreach($c in $connections){ Write-Host ('  - Port 3000 is in use by PID ' + $c.OwningProcess + '; leaving it untouched.') } } else { Write-Host '  - No listener on 3000.' }"
 
 echo.
-if %stopped% gtr 0 (
-    echo [INFO] Done. Stopped project processes: %stopped%
-) else (
-    echo [INFO] No running project services found on ports 8011/9231/3000.
-)
-echo [INFO] All MY Market Radar services stopped.
+echo [INFO] Local stop finished.
+echo [INFO] Docker deployments are stopped separately with stop_docker.bat.
 echo.
-echo    Press any key to close this window...
+echo Press any key to close this window...
 pause >nul
