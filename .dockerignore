@@ -1,23 +1,26 @@
-# 排除本地开发/运行产物，只打包镜像需要的内容
+.git
+.github
+.trae
+.vscode
+.idea
+.env
+.env.*
+*.log
+
 backend/venv
+backend/.venv
 backend/.playwright_browsers
 backend/logs
 backend/data
-backend/ozon_ai.db
+backend/*.db
+backend/*.sqlite3
 backend/**/__pycache__
-backend/*.pyc
+backend/**/*.pyc
 backend/debug*.py
 
 frontend/node_modules
-frontend/src
-frontend/public
-frontend/package*.json
-frontend/vite.config.*
-frontend/tsconfig*.json
-frontend/index.html
-frontend/.env*
+frontend/dist
 
-.git
-.trae
-*.log
-docs/
+*.spec
+*.tsbuildinfo
+build
