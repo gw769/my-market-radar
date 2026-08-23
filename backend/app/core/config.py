@@ -39,6 +39,7 @@ class Settings(BaseSettings):
 
     DATA_DIR: str = ""
     DATABASE_TYPE: str = "sqlite"
+    ALLOW_DATABASE_FALLBACK: bool = False
     MYSQL_HOST: str = ""
     MYSQL_PORT: int = Field(default=3306, ge=1, le=65535)
     MYSQL_USER: str = ""
@@ -59,6 +60,14 @@ class Settings(BaseSettings):
     LLM_MODEL: str = "deepseek-chat"
     LLM_API_KEY: str = ""
     LLM_BASE_URL: str = "https://api.deepseek.com"
+
+    @field_validator("DATABASE_TYPE", mode="before")
+    @classmethod
+    def validate_database_type(cls, value: str) -> str:
+        normalized = str(value).strip().lower()
+        if normalized not in {"sqlite", "mysql"}:
+            raise ValueError("DATABASE_TYPE 仅支持 sqlite 或 mysql")
+        return normalized
 
     @field_validator("DEFAULT_DAILY_TIME")
     @classmethod
@@ -84,7 +93,7 @@ class Settings(BaseSettings):
 
     @property
     def DATABASE_URL(self) -> str:
-        if self.DATABASE_TYPE.lower() == "mysql":
+        if self.DATABASE_TYPE == "mysql":
             user = quote_plus(self.MYSQL_USER)
             password = quote_plus(self.MYSQL_PASSWORD)
             return (
