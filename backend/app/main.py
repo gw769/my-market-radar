@@ -47,27 +47,40 @@ async def lifespan(app: FastAPI):
 
 
 def _ensure_default_admin():
-    """首次启动时自动创建默认管理员账户"""
+    """Bootstrap the very first account only when an explicit password is configured."""
     from app.core.database import SessionLocal
     from app.core.security import get_password_hash
     from app.models.user import User
 
     db = SessionLocal()
     try:
-        existing = db.query(User).filter(User.email == "admin@market.my").first()
-        if not existing:
-            admin = User(
-                username="admin",
-                email="admin@market.my",
-                password_hash=get_password_hash("admin123"),
+        # Never create a known fallback account beside an existing user database. This also
+        # avoids turning imported databases into deployments with an unexpected backdoor user.
+        if db.query(User).first():
+            logger.info("已有用户账户，跳过管理员引导")
+            return
+
+        password = settings.BOOTSTRAP_ADMIN_PASSWORD
+        if not password:
+            logger.warning(
+                "数据库尚无用户，但未设置 BOOTSTRAP_ADMIN_PASSWORD；不会自动创建已知默认密码账户"
             )
-            db.add(admin)
-            db.commit()
-            logger.info("默认管理员已创建: admin@market.my / admin123")
-        else:
-            logger.info("管理员账户已存在，跳过创建")
-    except Exception as e:
-        logger.error(f"创建默认管理员失败: {e}")
+            return
+        if len(password) < 6:
+            logger.error("BOOTSTRAP_ADMIN_PASSWORD 至少需要 6 个字符，管理员账户未创建")
+            return
+
+        admin = User(
+            username=settings.BOOTSTRAP_ADMIN_USERNAME,
+            email=settings.BOOTSTRAP_ADMIN_EMAIL,
+            password_hash=get_password_hash(password),
+        )
+        db.add(admin)
+        db.commit()
+        logger.info("首次管理员已创建: %s", settings.BOOTSTRAP_ADMIN_EMAIL)
+    except Exception as exc:
+        db.rollback()
+        logger.error("创建首次管理员失败: %s", exc, exc_info=True)
     finally:
         db.close()
 
