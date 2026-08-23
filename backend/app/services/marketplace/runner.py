@@ -27,6 +27,7 @@ from app.services.marketplace.browser import (
     ensure_platform_tab,
     find_platform_tab,
 )
+from app.services.marketplace.calibration import calibrate_analysis
 from app.services.marketplace.evidence import build_evidence_summary
 from app.services.marketplace.health import assess_collection_health, summarize_collector_health
 from app.services.marketplace.scoring import build_analysis
@@ -221,8 +222,6 @@ def _persist_platform(
         if claimed != 1:
             db.rollback()
             raise WorkerLeaseLost(f"run {run_id} 的 worker 租约已失效")
-        # The conditional UPDATE above acquires the DB write/row lock before snapshots change.
-        # A watchdog cannot swap worker_id until this checkpoint transaction finishes.
         db.query(ListingSnapshot).filter(
             ListingSnapshot.run_id == run_id,
             ListingSnapshot.platform == platform,
@@ -507,8 +506,6 @@ def execute_run_sync(run_id: int) -> None:
 
     db = SessionLocal()
     try:
-        # Conditional UPDATE is the finalization lease claim. It both verifies ownership and
-        # acquires the DB write/row lock, closing the select-then-write race with the watchdog.
         claimed = (
             db.query(AnalysisRun)
             .filter(
@@ -539,7 +536,7 @@ def execute_run_sync(run_id: int) -> None:
         db.flush()
 
         by_platform = {platform: [listing.to_dict() for listing in listings] for platform, listings in collected.items()}
-        analysis = build_analysis(collection_request.keyword, by_platform)
+        analysis = calibrate_analysis(build_analysis(collection_request.keyword, by_platform))
         collector_health = summarize_collector_health(platform_health, collection_request.platforms)
         evidence = build_evidence_summary(
             analysis["platform_scores"],
