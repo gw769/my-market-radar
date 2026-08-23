@@ -33,7 +33,7 @@ export default function Login() {
       <label>密码<input value={password} onChange={(e) => setPassword(e.target.value)} type="password" autoComplete="current-password" required /></label>
       {error && <div className="error-box">{error}</div>}
       <button className="primary-button" disabled={busy}>{busy ? "正在登录…" : "进入市场雷达"}<ArrowRight size={17} /></button>
-      <small>首次生产/Docker 部署需要在 .env 设置 BOOTSTRAP_ADMIN_PASSWORD；本机无 .env 的 start.py 才提供临时默认账号。</small>
+      <small>首次部署请在 .env 设置 BOOTSTRAP_ADMIN_PASSWORD；已有账户不会重复创建。</small>
     </form></section>
   </div>;
 }
