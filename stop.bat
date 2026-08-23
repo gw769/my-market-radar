@@ -9,9 +9,10 @@ echo   Stopping MY Market Radar local services...
 echo ================================================================
 echo.
 
-REM 1. Stop the normal start_local.bat launcher tree first.
+REM 1. Stop only the exact start_local.bat launcher title.
+REM Do not use a wildcard here: a normal Chrome window can be titled "MY Market Radar - Google Chrome".
 echo [INFO] Stopping launcher window if it is running...
-taskkill /F /T /FI "WINDOWTITLE eq MY Market Radar*" >nul 2>&1
+taskkill /F /T /FI "WINDOWTITLE eq MY Market Radar" >nul 2>&1
 timeout /t 1 /nobreak >nul
 
 REM 2. Only stop port 8011 when the owning command line can be identified as this app.
