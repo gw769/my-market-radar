@@ -136,11 +136,33 @@ class RunnerStateTests(unittest.TestCase):
         run_id = run.id
         db.close()
 
-        async def empty_collect(_request, _run_id):
-            return {"shopee": [], "lazada": []}, {
-                "shopee": "公开搜索页没有返回可解析商品",
-                "lazada": "公开搜索页没有返回可解析商品",
+        def empty_health():
+            return {
+                "status": "empty",
+                "health_score": 15.0,
+                "raw_count": 0,
+                "parsed_count": 0,
+                "target_limit": 20,
+                "parse_ratio": 0.0,
+                "coverage": {
+                    "price": 0.0,
+                    "sold_count": 0.0,
+                    "review_count": 0.0,
+                    "rating": 0.0,
+                    "seller_identity": 0.0,
+                },
+                "warnings": ["可解析商品样本偏少"],
             }
+
+        async def empty_collect(_request, _run_id, _worker_id):
+            return (
+                {"shopee": [], "lazada": []},
+                {
+                    "shopee": "公开搜索页没有返回可解析商品",
+                    "lazada": "公开搜索页没有返回可解析商品",
+                },
+                {"shopee": empty_health(), "lazada": empty_health()},
+            )
 
         with patch.object(runner, "SessionLocal", self.Session), patch.object(runner, "_collect", empty_collect):
             runner.execute_run_sync(run_id)
@@ -151,6 +173,9 @@ class RunnerStateTests(unittest.TestCase):
         self.assertEqual(completed.current_step, "未采集到有效商品")
         self.assertIsNone(completed.opportunity_score)
         self.assertIn("Shopee", completed.error_message)
+        self.assertEqual(completed.analysis["evidence"]["grade"], "D")
+        self.assertIsNone(completed.worker_id)
+        self.assertIsNone(completed.heartbeat_at)
         db.close()
 
     def test_partial_retry_creates_new_run_and_preserves_old_attempt(self):
