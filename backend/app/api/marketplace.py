@@ -14,6 +14,7 @@ from app.core.security import get_current_user
 from app.models.marketplace import AnalysisRun, ListingSnapshot, TrackedKeyword
 from app.models.user import User
 from app.schemas.marketplace import KeywordCreate, KeywordUpdate
+from app.services.marketplace.query_localization import marketplace_search_term
 from app.services.marketplace.report import build_report
 from app.services.marketplace.runner import create_run, open_verification_browser, submit_run
 from app.services.marketplace.scheduler import next_run_utc
@@ -37,8 +38,11 @@ def _keyword_payload(
     return {
         "id": keyword.id,
         "keyword": keyword.keyword,
+        "marketplace_query": marketplace_search_term(keyword.keyword),
         "platforms": keyword.platforms,
         "results_limit": keyword.results_limit,
+        "search_pages": settings.SEARCH_PAGES,
+        "max_results_per_platform": keyword.results_limit * settings.SEARCH_PAGES,
         "tracking_enabled": keyword.tracking_enabled,
         "daily_time": keyword.daily_time,
         "timezone": keyword.timezone,
@@ -110,6 +114,8 @@ def marketplace_defaults(current_user: User = Depends(get_current_user)):
         "success": True,
         "data": {
             "results_limit": settings.DEFAULT_RESULTS_LIMIT,
+            "search_pages": settings.SEARCH_PAGES,
+            "max_results_per_platform": settings.DEFAULT_RESULTS_LIMIT * settings.SEARCH_PAGES,
             "daily_time": settings.DEFAULT_DAILY_TIME,
             "timezone": settings.DEFAULT_TIMEZONE,
             "platforms": ["shopee", "lazada"],
@@ -202,6 +208,9 @@ def get_items(run_id: int, platform: str | None = Query(default=None), db: Sessi
         "sold_count": row.sold_count, "rating": row.rating, "review_count": row.review_count,
         "seller_name": row.seller_name, "seller_location": row.seller_location,
         "is_sponsored": row.is_sponsored, "search_rank": row.search_rank,
+        "search_page": (row.raw_data or {}).get("search_page"),
+        "page_rank": (row.raw_data or {}).get("page_rank"),
+        "page_size": (row.raw_data or {}).get("page_size"),
         "data_quality": row.data_quality, "collected_at": _iso(row.collected_at),
     } for row in rows]}
 

@@ -6,6 +6,8 @@ import statistics
 from collections import Counter, defaultdict
 from typing import Any
 
+from app.services.marketplace.query_localization import relevance_phrases
+
 
 ACCESSORY_TERMS = {
     "accessory", "accessories", "replacement", "spare", "part", "parts",
@@ -141,7 +143,7 @@ def _looks_like_bundle(keyword: str, title: str) -> bool:
     return False
 
 
-def relevance_score(keyword: str, title: str) -> float:
+def _single_phrase_relevance_score(keyword: str, title: str) -> float:
     keyword = " ".join(keyword.lower().split())
     title = " ".join(title.lower().split())
     if not keyword or not title:
@@ -173,12 +175,25 @@ def relevance_score(keyword: str, title: str) -> float:
     return round(overlap, 4)
 
 
+def relevance_score(keyword: str, title: str) -> float:
+    phrases = relevance_phrases(keyword)
+    if not phrases:
+        return 0.0
+    return max(_single_phrase_relevance_score(phrase, title) for phrase in phrases)
+
+
 def _exclusion_reason(keyword: str, title: str) -> str | None:
-    if _looks_like_accessory(keyword, title):
-        return "accessory"
-    if _looks_like_bundle(keyword, title):
+    # A localized alias can establish that an apparent accessory word is actually the
+    # requested product ("sticker" in "nail sticker"). Only classify the row after all
+    # strict aliases have had a chance to match.
+    phrases = relevance_phrases(keyword) or (keyword,)
+    if any(_looks_like_bundle(phrase, title) for phrase in phrases):
         return "bundle"
-    return None if relevance_score(keyword, title) >= 0.6 else "low_relevance"
+    if relevance_score(keyword, title) >= 0.6:
+        return None
+    if any(_looks_like_accessory(phrase, title) for phrase in phrases):
+        return "accessory"
+    return "low_relevance"
 
 
 def _relevant_items(
@@ -480,7 +495,12 @@ def score_platform(
 
 
 def _segment_feature_tokens(title: str, keyword: str) -> set[str]:
-    query_tokens = set(_tokens(keyword))
+    # Localized aliases describe the same product family, not separate opportunity segments.
+    query_tokens = {
+        token
+        for phrase in (relevance_phrases(keyword) or (keyword,))
+        for token in _tokens(phrase)
+    }
     features: set[str] = set()
     for token in _tokens(title):
         if token in query_tokens or token in SEGMENT_STOPWORDS:

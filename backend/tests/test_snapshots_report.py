@@ -66,12 +66,20 @@ class SnapshotAndReportTests(unittest.TestCase):
             "lazada": {"score": 60, "verdict": "谨慎观察", "sample_size": 11, "confidence": 79},
         }
         run.analysis = {
-            "request_config": {"keyword": "water bottle", "platforms": ["shopee", "lazada"], "results_limit": 20},
+            "request_config": {
+                "keyword": "water bottle",
+                "marketplace_query": "water bottle",
+                "platforms": ["shopee", "lazada"],
+                "results_limit": 20,
+                "search_pages": 3,
+                "max_results_per_platform": 60,
+            },
             "recommendations": ["先小批量测试。"],
         }
         db.add(ListingSnapshot(
             run_id=run.id, keyword_id=self.keyword_id, platform="lazada", item_id="l1",
-            title="Bottle", product_url="https://example.test/l1", price=20, search_rank=1, data_quality=0.5,
+            title="Bottle", product_url="https://example.test/l1", price=20, search_rank=24,
+            data_quality=0.5, raw_data={"search_page": 2, "page_rank": 4, "page_size": 20},
         ))
         db.commit()
         output = build_report(db, run)
@@ -81,10 +89,20 @@ class SnapshotAndReportTests(unittest.TestCase):
             ["综合结论", "Shopee竞品", "Lazada竞品", "每日价格与排名趋势", "数据口径说明"],
         )
         lazada = workbook["Lazada竞品"]
-        self.assertEqual(lazada.cell(2, 4).value, "—")
-        summary_labels = [row[0].value for row in workbook["综合结论"].iter_rows()]
+        self.assertEqual(lazada.cell(2, 1).value, 24)
+        self.assertEqual(lazada.cell(2, 2).value, 2)
+        self.assertEqual(lazada.cell(2, 3).value, 4)
+        self.assertEqual(lazada.cell(2, 6).value, "—")
+        summary_rows = list(workbook["综合结论"].iter_rows())
+        summary_labels = [row[0].value for row in summary_rows]
         self.assertIn("Lazada 结论", summary_labels)
         self.assertIn("本次扫描配置", summary_labels)
+        query_row = next(row for row in summary_rows if row[0].value == "平台实际搜索词")
+        self.assertEqual(query_row[1].value, "water bottle")
+        trend = workbook["每日价格与排名趋势"]
+        self.assertEqual(trend.cell(2, 8).value, 24)
+        self.assertEqual(trend.cell(2, 9).value, 2)
+        self.assertEqual(trend.cell(2, 10).value, 4)
         db.close()
 
     def test_trend_excludes_running_verification_and_failed_checkpoints(self):

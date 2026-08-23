@@ -52,6 +52,10 @@ async function platformTab(platform, createUrl) {
 
 async function attach(params) {
   const tab = await platformTab(params.platform, params.url);
+  const activeTab = await chrome.tabs.update(tab.id, { active: true });
+  if (activeTab.windowId !== undefined) {
+    await chrome.windows.update(activeTab.windowId, { focused: true });
+  }
   const target = { tabId: tab.id };
   try {
     await chrome.debugger.attach(target, "1.3");

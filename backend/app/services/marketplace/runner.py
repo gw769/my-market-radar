@@ -32,6 +32,7 @@ from app.services.marketplace.evidence import build_evidence_summary
 from app.services.marketplace.extension_bridge import extension_request
 from app.services.marketplace.health import assess_collection_health, summarize_collector_health
 from app.services.marketplace.raw_collection import RawCardAccumulator
+from app.services.marketplace.query_localization import marketplace_search_term
 from app.services.marketplace.scoring import build_analysis
 
 settings = get_settings()
@@ -56,10 +57,15 @@ def _worker_token(run_id: int) -> str:
 
 
 def _request_config(keyword: TrackedKeyword) -> dict[str, Any]:
+    results_limit = int(keyword.results_limit)
+    search_pages = int(settings.SEARCH_PAGES)
     return {
         "keyword": keyword.keyword,
+        "marketplace_query": marketplace_search_term(keyword.keyword),
         "platforms": list(keyword.platforms or []),
-        "results_limit": int(keyword.results_limit),
+        "results_limit": results_limit,
+        "search_pages": search_pages,
+        "max_results_per_platform": results_limit * search_pages,
     }
 
 
@@ -71,15 +77,26 @@ def _collection_request(run: AnalysisRun, keyword: TrackedKeyword) -> SimpleName
         results_limit = int(config.get("results_limit", keyword.results_limit))
     except (TypeError, ValueError):
         results_limit = int(keyword.results_limit)
+    try:
+        search_pages = max(1, min(5, int(config.get("search_pages", settings.SEARCH_PAGES))))
+    except (TypeError, ValueError):
+        search_pages = int(settings.SEARCH_PAGES)
     return SimpleNamespace(
         id=keyword.id,
         keyword=str(config.get("keyword") or keyword.keyword),
         platforms=platforms,
         results_limit=results_limit,
+        search_pages=search_pages,
         request_config={
             "keyword": str(config.get("keyword") or keyword.keyword),
+            "marketplace_query": str(
+                config.get("marketplace_query")
+                or marketplace_search_term(str(config.get("keyword") or keyword.keyword))
+            ),
             "platforms": platforms,
             "results_limit": results_limit,
+            "search_pages": search_pages,
+            "max_results_per_platform": results_limit * search_pages,
         },
     )
 
@@ -306,13 +323,51 @@ def _runtime_value(result: dict[str, Any], default: Any = None) -> Any:
     return result.get("result", {}).get("value", default)
 
 
+def _positive_int(value: Any, fallback: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return parsed if parsed > 0 else fallback
+
+
+def _enrich_first_listing(existing: MarketplaceListing, incoming: MarketplaceListing) -> None:
+    """Fill missing public fields without changing the product's first-seen provenance."""
+    for field in (
+        "shop_id",
+        "image_url",
+        "price",
+        "original_price",
+        "discount_percent",
+        "sold_count",
+        "rating",
+        "review_count",
+        "seller_name",
+        "seller_location",
+        "is_sponsored",
+    ):
+        if getattr(existing, field) in (None, "") and getattr(incoming, field) not in (None, ""):
+            setattr(existing, field, getattr(incoming, field))
+    if len(incoming.title.strip()) > len(existing.title.strip()):
+        existing.title = incoming.title
+    first_raw = dict(existing.raw_data or {})
+    for key, value in (incoming.raw_data or {}).items():
+        if key in {"search_page", "page_rank", "page_size"}:
+            continue
+        if first_raw.get(key) in (None, "", [], {}) and value not in (None, "", [], {}):
+            first_raw[key] = value
+    existing.raw_data = first_raw
+    existing.data_quality = max(existing.data_quality, incoming.data_quality)
+
+
 async def _collect_resident_tab(
     adapter: Any,
     keyword: str,
     limit: int,
+    search_pages: int,
     run_id: int,
     worker_id: str,
-) -> tuple[str, str, list[dict[str, Any]]]:
+) -> tuple[str, str, list[dict[str, Any]], list[MarketplaceListing], list[str]]:
     url = adapter.search_url(keyword)
     if settings.BROWSER_MODE == "extension":
         socket_context: Any = _ExtensionCDPSocket(adapter.platform, url)
@@ -325,8 +380,12 @@ async def _collect_resident_tab(
 
     current_url = url
     body_text = ""
-    accumulator = RawCardAccumulator(max_cards=max(200, limit * 4))
-    raw_cards: list[dict[str, Any]] = []
+    pages = max(1, min(5, int(search_pages)))
+    all_raw = RawCardAccumulator(max_cards=max(200, limit * pages * 4))
+    listings: list[MarketplaceListing] = []
+    seen_item_ids: set[str] = set()
+    listings_by_id: dict[str, MarketplaceListing] = {}
+    page_warnings: list[str] = []
     last_heartbeat = 0.0
     async with socket_context as socket:
         request_id = 1
@@ -334,58 +393,133 @@ async def _collect_resident_tab(
         request_id += 1
         await _cdp_call(socket, request_id, "Runtime.enable")
         request_id += 1
-        await _cdp_call(socket, request_id, "Page.navigate", {"url": url})
+        await _cdp_call(socket, request_id, "Page.bringToFront")
 
-        collection_window = max(5.0, min(float(settings.COLLECTION_TIMEOUT_SECONDS), 120.0))
-        deadline = time.monotonic() + collection_window
-        previous_count = -1
-        stable_rounds = 0
-        while time.monotonic() < deadline:
-            now_mono = time.monotonic()
-            if now_mono - last_heartbeat >= settings.RUN_HEARTBEAT_SECONDS:
-                _require_lease(run_id, worker_id)
-                last_heartbeat = now_mono
+        # The timeout is per page. Each URL represents a real result page and must get a full
+        # render/scroll opportunity; dividing one timeout across all pages made later pages race
+        # the marketplaces' virtualized grids.
+        page_window = max(8.0, min(float(settings.COLLECTION_TIMEOUT_SECONDS), 45.0))
+        for page_number in range(1, pages + 1):
+            page_url = adapter.search_url(keyword, page=page_number)
+            page_raw = RawCardAccumulator(max_cards=max(100, limit * 4))
+            try:
+                _require_lease(
+                    run_id,
+                    worker_id,
+                    current_step=(
+                        f"正在采集 {adapter.platform.title()} Malaysia · "
+                        f"第 {page_number}/{pages} 页"
+                    ),
+                )
+                request_id += 1
+                await _cdp_call(socket, request_id, "Page.navigate", {"url": page_url})
+                request_id += 1
+                await _cdp_call(
+                    socket,
+                    request_id,
+                    "Runtime.evaluate",
+                    {"expression": "window.scrollTo(0, 0); true", "returnByValue": True},
+                )
 
-            await asyncio.sleep(1.0)
-            request_id += 1
-            location = await _cdp_call(socket, request_id, "Runtime.evaluate", {"expression": "location.href", "returnByValue": True})
-            request_id += 1
-            body = await _cdp_call(socket, request_id, "Runtime.evaluate", {"expression": "document.body ? document.body.innerText : ''", "returnByValue": True})
-            current_url = str(_runtime_value(location, url) or url)
-            body_text = str(_runtime_value(body, "") or "")
-            if adapter.is_verification_page(current_url, body_text):
-                return current_url, body_text, []
+                deadline = time.monotonic() + page_window
+                previous_count = -1
+                stable_rounds = 0
+                at_bottom = False
+                while time.monotonic() < deadline:
+                    now_mono = time.monotonic()
+                    if now_mono - last_heartbeat >= settings.RUN_HEARTBEAT_SECONDS:
+                        _require_lease(run_id, worker_id)
+                        last_heartbeat = now_mono
 
-            request_id += 1
-            cards = await _cdp_call(
-                socket,
-                request_id,
-                "Runtime.evaluate",
-                {"expression": f"({adapter.extraction_script})()", "returnByValue": True, "awaitPromise": True},
-            )
-            value = _runtime_value(cards, [])
-            round_cards = value if isinstance(value, list) else []
-            accumulator.add(round_cards)
-            raw_cards = accumulator.cards()
+                    await asyncio.sleep(1.0)
+                    request_id += 1
+                    location = await _cdp_call(socket, request_id, "Runtime.evaluate", {"expression": "location.href", "returnByValue": True})
+                    request_id += 1
+                    body = await _cdp_call(socket, request_id, "Runtime.evaluate", {"expression": "document.body ? document.body.innerText : ''", "returnByValue": True})
+                    current_url = str(_runtime_value(location, page_url) or page_url)
+                    body_text = str(_runtime_value(body, "") or "")
+                    if adapter.is_verification_page(current_url, body_text):
+                        return current_url, body_text, [], [], page_warnings
 
-            usable_count = len(adapter.parse_cards(raw_cards, limit))
-            if usable_count >= limit:
-                break
-            stable_rounds = stable_rounds + 1 if usable_count > 0 and usable_count == previous_count else 0
-            if stable_rounds >= 3 and usable_count >= min(6, limit):
-                break
-            previous_count = usable_count
+                    request_id += 1
+                    cards = await _cdp_call(
+                        socket,
+                        request_id,
+                        "Runtime.evaluate",
+                        {"expression": f"({adapter.extraction_script})()", "returnByValue": True, "awaitPromise": True},
+                    )
+                    value = _runtime_value(cards, [])
+                    page_raw.add(value if isinstance(value, list) else [])
 
-            request_id += 1
-            await _cdp_call(
-                socket,
-                request_id,
-                "Runtime.evaluate",
-                {"expression": "window.scrollBy(0, Math.max(window.innerHeight, 700)); true", "returnByValue": True},
-            )
+                    usable_count = len(adapter.parse_cards(page_raw.cards(), limit))
+                    if usable_count >= limit:
+                        break
+                    stable_rounds = stable_rounds + 1 if usable_count > 0 and usable_count == previous_count else 0
+                    if stable_rounds >= 3 and at_bottom and usable_count >= min(6, limit):
+                        break
+                    previous_count = usable_count
+
+                    request_id += 1
+                    scroll = await _cdp_call(
+                        socket,
+                        request_id,
+                        "Runtime.evaluate",
+                        {
+                            "expression": (
+                                "(() => { const before = window.scrollY; "
+                                "window.scrollBy(0, Math.max(window.innerHeight, 700)); "
+                                "return { moved: window.scrollY > before + 1, "
+                                "atBottom: window.innerHeight + window.scrollY >= "
+                                "document.documentElement.scrollHeight - 24 }; })()"
+                            ),
+                            "returnByValue": True,
+                        },
+                    )
+                    scroll_state = _runtime_value(scroll, {})
+                    at_bottom = bool(
+                        isinstance(scroll_state, dict) and scroll_state.get("atBottom")
+                    )
+            except WorkerLeaseLost:
+                raise
+            except Exception as exc:
+                if not listings:
+                    raise
+                page_warnings.append(f"第 {page_number} 页采集失败：{str(exc)[:180]}")
+                logger.warning(
+                    "%s 第 %s/%s 页采集失败，保留前页结果: %s",
+                    adapter.platform,
+                    page_number,
+                    pages,
+                    exc,
+                )
+                continue
+
+            page_cards = page_raw.cards()
+            all_raw.add(page_cards)
+            page_listings = adapter.parse_cards(page_cards, limit)
+            if not page_listings:
+                page_warnings.append(f"第 {page_number} 页没有采集到可解析商品")
+                continue
+            for listing in page_listings:
+                raw = dict(listing.raw_data or {})
+                local_rank = _positive_int(raw.get("page_position"), listing.search_rank)
+                page_size = max(local_rank, _positive_int(raw.get("page_size"), limit))
+                listing.search_rank = (page_number - 1) * page_size + local_rank
+                listing.raw_data = {
+                    **raw,
+                    "search_page": page_number,
+                    "page_rank": local_rank,
+                    "page_size": page_size,
+                }
+                if listing.item_id in seen_item_ids:
+                    _enrich_first_listing(listings_by_id[listing.item_id], listing)
+                    continue
+                seen_item_ids.add(listing.item_id)
+                listings_by_id[listing.item_id] = listing
+                listings.append(listing)
 
     _require_lease(run_id, worker_id)
-    return current_url, body_text, raw_cards
+    return current_url, body_text, all_raw.cards(), listings, page_warnings
 
 
 async def _collect(
@@ -412,25 +546,35 @@ async def _collect(
         progress = 10 + int(index / len(platforms) * 55)
         _require_lease(run_id, worker_id, progress=progress, current_step=f"正在采集 {platform.title()} Malaysia")
         try:
-            current_url, body, raw_cards = await _collect_resident_tab(
+            current_url, body, raw_cards, listings, page_warnings = await _collect_resident_tab(
                 adapter,
                 keyword.keyword,
                 keyword.results_limit,
+                keyword.search_pages,
                 run_id,
                 worker_id,
             )
             if adapter.is_verification_page(current_url, body):
                 raise VerificationRequired(platform, current_url)
 
-            listings = adapter.parse_cards(raw_cards, keyword.results_limit)
-            health = assess_collection_health(raw_cards, listings, keyword.results_limit)
+            target_limit = keyword.results_limit * keyword.search_pages
+            health = assess_collection_health(raw_cards, listings, target_limit)
+            if page_warnings:
+                health["warnings"] = [*(health.get("warnings") or []), *page_warnings]
+                if health.get("status") == "healthy":
+                    health["status"] = "degraded"
             platform_health[platform] = health
+            platform_errors: list[str] = []
+            if page_warnings:
+                platform_errors.append("部分页面未完整采集：" + "；".join(page_warnings))
             if raw_cards and not listings:
-                errors[platform] = "搜索页有内容，但当前页面结构无法解析；请检查采集适配器"
+                platform_errors.append("搜索页有内容，但当前页面结构无法解析；请检查采集适配器")
             elif not listings:
-                errors[platform] = "公开搜索页没有返回可解析商品"
+                platform_errors.append("公开搜索页没有返回可解析商品")
             elif health["status"] == "unhealthy":
-                errors[platform] = "采集器健康度异常，页面结构可能已经变化"
+                platform_errors.append("采集器健康度异常，页面结构可能已经变化")
+            if platform_errors:
+                errors[platform] = "；".join(platform_errors)
             results[platform] = listings
             _persist_platform(run_id, keyword.id, platform, listings, worker_id)
             await asyncio.sleep(1.0)
@@ -441,7 +585,11 @@ async def _collect(
         except Exception as exc:
             logger.warning("%s 采集失败: %s", platform, exc, exc_info=True)
             results[platform] = []
-            health = assess_collection_health([], [], keyword.results_limit)
+            health = assess_collection_health(
+                [],
+                [],
+                keyword.results_limit * keyword.search_pages,
+            )
             health["status"] = "error"
             health["health_score"] = 0.0
             health["warnings"] = [str(exc)[:300]]
@@ -626,7 +774,7 @@ def execute_run_sync(run_id: int) -> None:
         if not successful:
             run.status = "failed"
             run.current_step = "未采集到有效商品"
-        elif expected == successful:
+        elif expected == successful and not collection_errors:
             run.status = "completed"
             run.current_step = "分析完成"
         else:

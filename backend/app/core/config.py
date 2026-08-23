@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     RUN_HEARTBEAT_SECONDS: int = Field(default=10, ge=3, le=60)
     RUN_STALE_AFTER_SECONDS: int = Field(default=240, ge=60, le=1800)
     DEFAULT_RESULTS_LIMIT: int = Field(default=20, ge=10, le=40)
+    SEARCH_PAGES: int = Field(default=3, ge=1, le=5)
     DEFAULT_DAILY_TIME: str = "20:00"
     DEFAULT_TIMEZONE: str = "Asia/Kuala_Lumpur"
 

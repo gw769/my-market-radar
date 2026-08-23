@@ -57,8 +57,16 @@ class DiscoveryDeepScanTests(unittest.TestCase):
         run = db.query(AnalysisRun).filter_by(id=response["run"]["id"]).one()
         self.assertTrue(response["queued"])
         self.assertEqual(run.trigger, "discovery_deep")
-        self.assertEqual(run.analysis["request_config"]["results_limit"], 40)
-        self.assertEqual(run.analysis["request_config"]["platforms"], ["shopee", "lazada"])
+        expected_request = {
+            "keyword": "water bottle",
+            "marketplace_query": "water bottle",
+            "platforms": ["shopee", "lazada"],
+            "results_limit": 40,
+            "search_pages": 3,
+            "max_results_per_platform": 120,
+        }
+        self.assertEqual(run.analysis["request_config"], expected_request)
+        self.assertEqual(response["request_config"], expected_request)
         self.assertEqual(run.analysis["scan_mode"], "discovery_deep")
         self.assertEqual(keyword.results_limit, 15)
         self.assertFalse(keyword.tracking_enabled)

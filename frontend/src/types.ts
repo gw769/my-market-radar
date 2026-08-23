@@ -22,7 +22,7 @@ export interface OpportunitySegment {
   representative_titles: string[]; platform_scores: Record<string, PlatformScore>;
 }
 export interface Keyword {
-  id: number; keyword: string; platforms: string[]; results_limit: number;
+  id: number; keyword: string; marketplace_query?: string; platforms: string[]; results_limit: number; search_pages?: number;
   tracking_enabled: boolean; daily_time: string; timezone: string;
   last_run_at?: string; last_success_at?: string; next_run_at?: string;
   latest_run?: Run | null; latest_result_run?: Run | null;
@@ -32,5 +32,6 @@ export interface Listing {
   price?: number | null; original_price?: number | null; discount_percent?: number | null;
   sold_count?: number | null; rating?: number | null; review_count?: number | null;
   seller_name?: string; seller_location?: string; is_sponsored?: boolean | null;
-  search_rank: number; data_quality: number; collected_at?: string;
+  search_rank: number; search_page?: number | null; page_rank?: number | null; page_size?: number | null;
+  data_quality: number; collected_at?: string;
 }

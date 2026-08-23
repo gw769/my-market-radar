@@ -56,6 +56,8 @@ export default function Tracking() {
       {keywords.length === 0 && <div className="empty-state">还没有跟踪关键词。先去“关键词分析”创建一个。</div>}
       {keywords.map((item) => {
         const run = item.latest_run;
+        const searchPages = item.search_pages || 3;
+        const maxPerPlatform = item.results_limit * searchPages;
         const active = Boolean(run && ACTIVE_RUNS.has(run.status));
         const deleteBlocked = Boolean(run && DELETE_BLOCKED_RUNS.has(run.status));
         const resultRun = run && RESULT_RUNS.has(run.status) ? run : item.latest_result_run;
@@ -63,7 +65,7 @@ export default function Tracking() {
         return <article key={item.id} className={`tracking-card ${run?.id === highlighted ? "highlight" : ""}`}>
           <div className="tracking-main">
             <div className="keyword-monogram">{item.keyword.slice(0, 2).toUpperCase()}</div>
-            <div><h3>{item.keyword}</h3><p>{item.platforms.join(" + ")} · 每个平台 {item.results_limit} 条 · 每日 {item.daily_time}</p></div>
+            <div className="tracking-keyword-copy"><h3>{item.keyword}</h3><p>{item.platforms.join(" + ")}</p><div className="tracking-scan-meta"><span><b>前 {searchPages} 页</b>真实访问</span><span><b>{item.results_limit} 条</b> / 页</span><span><b>最多 {maxPerPlatform} 条</b> / 平台</span><span>每日 <b>{item.daily_time}</b></span></div></div>
           </div>
           <div className="tracking-status">
             {run && <StatusBadge status={run.status} />}

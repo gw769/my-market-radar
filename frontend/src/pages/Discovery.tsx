@@ -5,6 +5,8 @@ import type { Keyword, Run } from "@/types";
 
 interface MarketplaceDefaults {
   results_limit: number;
+  search_pages: number;
+  max_results_per_platform: number;
   daily_time: string;
   timezone: string;
   platforms: string[];
@@ -28,6 +30,14 @@ const PRESETS: DiscoveryPreset[] = [
 const RESULT_STATUSES = new Set(["completed", "partial"]);
 const ACTIVE_STATUSES = new Set(["pending", "running", "needs_verification"]);
 const GRADE_RANK: Record<string, number> = { A: 4, B: 3, C: 2, D: 1 };
+const FALLBACK_DEFAULTS: MarketplaceDefaults = {
+  results_limit: 20,
+  search_pages: 3,
+  max_results_per_platform: 60,
+  daily_time: "20:00",
+  timezone: "Asia/Kuala_Lumpur",
+  platforms: ["shopee", "lazada"],
+};
 
 function resultRun(keyword?: Keyword): Run | null {
   if (!keyword) return null;
@@ -39,12 +49,7 @@ function resultRun(keyword?: Keyword): Run | null {
 export default function Discovery() {
   const [selectedId, setSelectedId] = useState(PRESETS[0].id);
   const [keywords, setKeywords] = useState<Keyword[]>([]);
-  const [defaults, setDefaults] = useState<MarketplaceDefaults>({
-    results_limit: 20,
-    daily_time: "20:00",
-    timezone: "Asia/Kuala_Lumpur",
-    platforms: ["shopee", "lazada"],
-  });
+  const [defaults, setDefaults] = useState<MarketplaceDefaults>(FALLBACK_DEFAULTS);
   const [busy, setBusy] = useState(false);
   const [busySeed, setBusySeed] = useState("");
   const [message, setMessage] = useState("");
@@ -57,7 +62,20 @@ export default function Discovery() {
 
   useEffect(() => {
     apiGet<any>("/marketplace-defaults")
-      .then((response) => { if (response.data) setDefaults(response.data); })
+      .then((response) => {
+        if (!response.data) return;
+        const received = response.data as Partial<MarketplaceDefaults>;
+        const resultsLimit = received.results_limit || FALLBACK_DEFAULTS.results_limit;
+        const searchPages = received.search_pages || FALLBACK_DEFAULTS.search_pages;
+        setDefaults({
+          ...FALLBACK_DEFAULTS,
+          ...received,
+          results_limit: resultsLimit,
+          search_pages: searchPages,
+          max_results_per_platform: received.max_results_per_platform || resultsLimit * searchPages,
+          platforms: received.platforms?.length ? received.platforms : FALLBACK_DEFAULTS.platforms,
+        });
+      })
       .catch(() => {});
     load().catch(() => {});
     const timer = window.setInterval(() => {
@@ -67,7 +85,9 @@ export default function Discovery() {
   }, [load]);
 
   const preset = PRESETS.find((item) => item.id === selectedId) || PRESETS[0];
+  const searchPages = defaults.search_pages || FALLBACK_DEFAULTS.search_pages;
   const quickLimit = Math.max(10, Math.min(defaults.results_limit || 20, 15));
+  const quickPlatformMax = quickLimit * searchPages;
 
   const rows = useMemo(() => preset.seeds.map((seed) => {
     const keyword = keywords.find((item) => item.keyword.trim().toLowerCase() === seed.toLowerCase());
@@ -151,7 +171,7 @@ export default function Discovery() {
       if (response?.reason === "active_run") {
         setMessage(`${seed} 已有任务在运行，本次没有重复入队。`);
       } else if (response?.queued) {
-        setMessage(`${seed} 已开始深度扫描：${resultsLimit} 条/平台。本次覆盖不会修改关键词长期设置。`);
+        setMessage(`${seed} 已开始深度扫描：前 ${searchPages} 页、每页最多 ${resultsLimit} 条，单平台最多 ${resultsLimit * searchPages} 条。本次覆盖不会修改关键词长期设置。`);
       } else {
         setError(`${seed} 深度扫描没有进入队列，请稍后重试。`);
       }
@@ -170,7 +190,7 @@ export default function Discovery() {
         <h2>不先猜商品。<br /><em>先扫一组市场候选。</em></h2>
         <p>选择一个方向，系统会把预设候选送入现有 Shopee × Lazada 采集/评分链，用 Evidence、校准机会分和商品族可靠度排序。</p>
       </div>
-      <div className="hero-signal"><Compass /><strong>{preset.seeds.length}</strong><span>候选关键词<br />快速样本 {quickLimit}/平台</span></div>
+      <div className="hero-signal"><Compass /><strong>{preset.seeds.length}</strong><span>候选关键词<br />前 {searchPages} 页 · {quickLimit} 条/页 · 最多 {quickPlatformMax}/平台</span></div>
     </section>
 
     <section className="panel">
@@ -190,7 +210,7 @@ export default function Discovery() {
 
     <section className="panel">
       <div className="panel-title"><div><span>RANKED CANDIDATES</span><h3>{preset.name} · 候选机会榜</h3></div><Sparkles /></div>
-      <p className="method-note">第一轮用快速样本补齐候选，已有稳定/深扫结果不会被整组按钮降级覆盖。高价值候选用单行“深扫”提高本次样本上限，不修改长期跟踪配置。</p>
+      <p className="method-note">第一轮访问前 {searchPages} 页、每页最多 {quickLimit} 条，单平台最多 {quickPlatformMax} 条；已有稳定/深扫结果不会被整组按钮降级覆盖。高价值候选可提高每页上限，仍访问前 {searchPages} 页，不修改长期跟踪配置。</p>
       <div className="table-shell">
         <table>
           <thead><tr><th>#</th><th>候选</th><th>状态</th><th>Evidence</th><th>机会分</th><th>完整度</th><th>中位价</th><th>最高商品族</th><th>商品族可靠度</th><th>操作</th></tr></thead>
@@ -209,7 +229,7 @@ export default function Discovery() {
               className="table-action"
               disabled={row.active || busySeed === row.seed}
               onClick={() => deepScan(row.keyword!, row.seed, row.deepLimit)}
-            ><ScanSearch size={14} />{busySeed === row.seed ? "提交中" : row.active ? "任务中" : `深扫 ${row.deepLimit}`}</button> : "—"}</td>
+            ><ScanSearch size={14} />{busySeed === row.seed ? "提交中" : row.active ? "任务中" : `深扫 ${row.deepLimit}/页 × ${searchPages} · ≤${row.deepLimit * searchPages}/平台`}</button> : "—"}</td>
           </tr>)}</tbody>
         </table>
       </div>

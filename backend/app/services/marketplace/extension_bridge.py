@@ -13,7 +13,7 @@ from pathlib import Path
 
 
 EXTENSION_ID = "mfaihjehhndpmiakeolkpmkjnpllheho"
-EXTENSION_VERSION = "1.0.1"
+EXTENSION_VERSION = "1.0.2"
 PROJECT_ROOT = Path(__file__).parents[4]
 EXTENSION_CRX = PROJECT_ROOT / "chrome-extension.crx"
 

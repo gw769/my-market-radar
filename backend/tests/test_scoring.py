@@ -22,6 +22,20 @@ def samples(count: int, sold_base: int = 100, title: str = "water bottle stainle
     ]
 
 
+def nail_samples(titles: list[str]):
+    return [
+        {
+            "title": title,
+            "price": 6 + (index % 6),
+            "sold_count": 150 + index * 20,
+            "rating": 4.5 + (index % 4) / 10,
+            "review_count": 25 + index,
+            "is_sponsored": index % 5 == 0,
+        }
+        for index, title in enumerate(titles)
+    ]
+
+
 class ScoringTests(unittest.TestCase):
     def test_missing_core_values_never_produce_strong_verdict(self):
         missing = score_platform(
@@ -93,6 +107,51 @@ class ScoringTests(unittest.TestCase):
     def test_relevance_guard_requires_phrase_evidence(self):
         self.assertEqual(relevance_score("water bottle", "water bottle stainless 1L"), 1.0)
         self.assertLess(relevance_score("water bottle", "replacement bottle cap"), 0.6)
+
+    def test_nail_sticker_localized_aliases_are_core_products(self):
+        for title in (
+            "Disney Nail Sticker Floral",
+            "Cute Toenail Sticker Set",
+            "Pelekat Kuku Bunga",
+            "Sanrio 美甲贴纸 Nail Sticker Cute",
+        ):
+            with self.subTest(title=title):
+                self.assertGreaterEqual(relevance_score("指甲贴", title), 0.6)
+        for title in ("Henna Nail Art Kit", "Moxibustion Health Patch"):
+            with self.subTest(drift_title=title):
+                self.assertLess(relevance_score("指甲贴", title), 0.6)
+
+    def test_nail_sticker_breakdown_keeps_aliases_but_rejects_drift_and_bundles(self):
+        core_titles = [
+            "Disney Nail Sticker Floral",
+            "Cute Toenail Sticker Glitter",
+            "Pelekat Kuku Bunga",
+            "Sanrio 美甲贴纸 Nail Sticker Cute",
+        ] * 3
+        items = nail_samples(core_titles + [
+            "Henna Nail Art Kit",
+            "Moxibustion Health Patch",
+            "6pcs Nail Sticker Bundle",
+        ])
+
+        result = score_platform(items, keyword="指甲贴")
+
+        self.assertEqual(result["raw_sample_size"], 15)
+        self.assertEqual(result["sample_size"], 12)
+        self.assertEqual(
+            result["exclusion_breakdown"],
+            {"accessory": 0, "bundle": 1, "low_relevance": 2},
+        )
+        self.assertTrue(result["eligible"])
+
+    def test_water_bottle_sticker_remains_an_accessory(self):
+        result = score_platform(
+            samples(10) + samples(1, title="Water Bottle Sticker Waterproof"),
+            keyword="water bottle",
+        )
+        self.assertEqual(result["sample_size"], 10)
+        self.assertEqual(result["exclusion_breakdown"]["accessory"], 1)
+        self.assertLess(relevance_score("water bottle", "Water Bottle Sticker Waterproof"), 0.6)
 
     def test_extreme_price_spread_is_not_automatically_best(self):
         items = samples(20)
@@ -190,6 +249,21 @@ class ScoringTests(unittest.TestCase):
         self.assertIn("opportunity_segments", analysis)
         self.assertTrue(analysis["opportunity_segments"])
         self.assertIn("representative_titles", analysis["opportunity_segments"][0])
+
+    def test_localized_product_family_tokens_do_not_become_segments(self):
+        items = nail_samples(
+            [f"Nail Sticker Floral Design {index}" for index in range(8)]
+            + [f"Pelekat Kuku Glitter Design {index}" for index in range(8)]
+        )
+
+        segments = build_opportunity_segments("指甲贴", {"lazada": items})
+        tokens = {str(segment.get("token") or "").lower() for segment in segments}
+
+        self.assertTrue(segments)
+        self.assertTrue({"floral", "glitter"} & tokens)
+        self.assertTrue(
+            tokens.isdisjoint({"nail", "sticker", "stickers", "toenail", "decal", "decals", "pelekat", "kuku"})
+        )
 
 
 if __name__ == "__main__":

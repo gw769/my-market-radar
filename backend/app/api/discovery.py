@@ -3,14 +3,17 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.security import get_current_user
 from app.models.marketplace import AnalysisRun, TrackedKeyword
 from app.models.user import User
 from app.schemas.marketplace import RunCreate
+from app.services.marketplace.query_localization import marketplace_search_term
 from app.services.marketplace.runner import create_run, submit_run
 
 router = APIRouter(prefix="/api/discovery", tags=["Malaysia market discovery"])
+settings = get_settings()
 ACTIVE_STATUSES = ("pending", "running", "needs_verification")
 
 
@@ -63,9 +66,14 @@ def deep_scan_keyword(
     base_platforms = [str(platform) for platform in (keyword.platforms or [])]
     request_config = {
         "keyword": keyword.keyword,
+        "marketplace_query": marketplace_search_term(keyword.keyword),
         "platforms": list(payload.platforms or base_platforms),
         "results_limit": int(payload.results_limit or keyword.results_limit),
+        "search_pages": settings.SEARCH_PAGES,
     }
+    request_config["max_results_per_platform"] = (
+        request_config["results_limit"] * request_config["search_pages"]
+    )
     run.analysis = {**(run.analysis or {}), "request_config": request_config, "scan_mode": "discovery_deep"}
     db.commit()
     db.refresh(run)

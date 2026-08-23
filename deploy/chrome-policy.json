@@ -1,13 +1,5 @@
 {
   "ExtensionInstallForcelist": [
     "mfaihjehhndpmiakeolkpmkjnpllheho;https://market.deepworm.bio/browser-extension/updates.xml"
-  ],
-  "ExtensionSettings": {
-    "mfaihjehhndpmiakeolkpmkjnpllheho": {
-      "installation_mode": "force_installed",
-      "minimum_version_required": "1.0.1",
-      "override_update_url": true,
-      "update_url": "https://market.deepworm.bio/browser-extension/updates.xml"
-    }
-  }
+  ]
 }

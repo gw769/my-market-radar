@@ -14,10 +14,33 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 class AdapterTests(unittest.TestCase):
+    def test_malaysia_search_urls_localize_nail_sticker_and_preserve_page_contract(self):
+        shopee = ShopeeMalaysiaAdapter()
+        lazada = LazadaMalaysiaAdapter()
+
+        self.assertEqual(
+            [shopee.search_url("指甲贴", page=page) for page in (1, 2, 3)],
+            [
+                "https://shopee.com.my/search?keyword=nail%20sticker&page=0",
+                "https://shopee.com.my/search?keyword=nail%20sticker&page=1",
+                "https://shopee.com.my/search?keyword=nail%20sticker&page=2",
+            ],
+        )
+        self.assertEqual(
+            [lazada.search_url("指甲贴", page=page) for page in (1, 2, 3)],
+            [
+                "https://www.lazada.com.my/catalog/?q=nail%20sticker",
+                "https://www.lazada.com.my/catalog/?q=nail%20sticker&page=2",
+                "https://www.lazada.com.my/catalog/?q=nail%20sticker&page=3",
+            ],
+        )
+
     def test_formats_keep_public_values(self):
         self.assertEqual(parse_money("Bottle 12oz RM 19.90"), 19.90)
         self.assertEqual(parse_compact_count("1.2k+ sold"), 1200)
         self.assertEqual(parse_compact_count("2m terjual"), 2_000_000)
+        self.assertEqual(parse_compact_count("已售出2万+件"), 20_000)
+        self.assertEqual(parse_compact_count("售 3千+"), 3_000)
         self.assertEqual(parse_money_range("RM 10.00 - RM 25.50"), (10.0, 25.5))
         self.assertEqual(parse_money_range("RM 25 ~ 10"), (10.0, 25.0))
         self.assertIsNone(parse_money_range("RM 20.00\nRM 30.00"))
@@ -48,6 +71,49 @@ class AdapterTests(unittest.TestCase):
         row = ShopeeMalaysiaAdapter().parse_card(raw, 1)
         self.assertEqual(row.sold_count, 1200)
         self.assertEqual(row.review_count, 2400)
+
+    def test_chinese_sold_labels_survive_python_fallback(self):
+        cases = (
+            ("已售出767件", 767),
+            ("已售出2万+件", 20_000),
+            ("售 3千+", 3_000),
+        )
+        adapter = ShopeeMalaysiaAdapter()
+        for index, (label, expected) in enumerate(cases, start=1):
+            with self.subTest(label=label):
+                row = adapter.parse_card({
+                    "href": f"https://shopee.com.my/Nail-Sticker-i.1001.{9400 + index}",
+                    "title": "Nail Sticker",
+                    "text": f"Nail Sticker\nRM 9.90\n{label}\nSelangor",
+                    "price": "RM 9.90",
+                }, index)
+                self.assertIsNotNone(row)
+                self.assertEqual(row.sold_count, expected)
+
+    def test_standalone_parenthesized_review_line_is_parsed(self):
+        row = LazadaMalaysiaAdapter().parse_card({
+            "href": "https://www.lazada.com.my/products/nail-sticker-i9404-s.html",
+            "item_id": "9404",
+            "title": "Nail Sticker Floral",
+            "text": "Nail Sticker Floral\nRM 8.90\n4.8\n(36)\nSelangor",
+            "price": "RM 8.90",
+        }, 1)
+        self.assertIsNotNone(row)
+        self.assertEqual(row.review_count, 36)
+
+    def test_shopee_extraction_is_scoped_to_product_grid(self):
+        script = ShopeeMalaysiaAdapter().extraction_script
+        self.assertIn("document.querySelectorAll('[data-sqe=\"item\"]')", script)
+        self.assertIn("card.querySelector('a[href*=\"-i.\"]')", script)
+        self.assertNotIn("document.querySelectorAll('a[href*=\"-i.\"]')", script)
+        self.assertIn("page_position: pageIndex + 1, page_size: pageSize", script)
+
+    def test_extraction_scripts_recognize_chinese_ad_labels(self):
+        for adapter in (ShopeeMalaysiaAdapter(), LazadaMalaysiaAdapter()):
+            with self.subTest(platform=adapter.platform):
+                script = adapter.extraction_script
+                self.assertIn("sponsored: /sponsored|iklan|广告|廣告/i.test(text)", script)
+                self.assertIn("ad|advertisement|广告|廣告", script)
 
     def test_variant_price_range_is_not_scored_as_minimum_price(self):
         shopee = ShopeeMalaysiaAdapter().parse_card({

@@ -34,10 +34,22 @@ class TrendEvidenceTests(unittest.TestCase):
     def tearDown(self):
         self.engine.dispose()
 
-    def _snapshot(self, db, run, item_id, title, sold, reviews=10, rank=1, price=20.0, platform="shopee"):
+    def _snapshot(
+        self,
+        db,
+        run,
+        item_id,
+        title,
+        sold,
+        reviews=10,
+        rank=1,
+        price=20.0,
+        platform="shopee",
+        keyword_id=None,
+    ):
         db.add(ListingSnapshot(
             run_id=run.id,
-            keyword_id=self.keyword_id,
+            keyword_id=keyword_id or self.keyword_id,
             platform=platform,
             item_id=item_id,
             title=title,
@@ -146,6 +158,58 @@ class TrendEvidenceTests(unittest.TestCase):
         self.assertEqual(trend["overall"]["activity_share"], 0.0)
         self.assertEqual(trend["overall"]["median_sold_delta"], 0.0)
         self.assertTrue(any("累计已售" in text for text in trend["recommendations"]))
+        db.close()
+
+    def test_chinese_keyword_tracks_english_and_malay_nail_sticker_titles(self):
+        db = self.Session()
+        user = db.query(User).first()
+        keyword = TrackedKeyword(user_id=user.id, keyword="指甲贴")
+        db.add(keyword)
+        db.flush()
+        previous = AnalysisRun(
+            keyword_id=keyword.id,
+            status="completed",
+            completed_at=datetime(2026, 8, 22, 12, 0, 0),
+        )
+        current = AnalysisRun(
+            keyword_id=keyword.id,
+            status="completed",
+            completed_at=datetime(2026, 8, 23, 12, 0, 0),
+        )
+        db.add_all([previous, current])
+        db.flush()
+
+        titles = [
+            "Disney Nail Sticker Floral",
+            "Cute Toenail Sticker Glitter",
+            "Pelekat Kuku Bunga",
+            "Sanrio Nail Decal",
+            "Nail Stickers Colorful",
+            "Toenail Stickers Summer",
+        ]
+        for index, title in enumerate(titles):
+            item_id = f"nail-{index}"
+            self._snapshot(
+                db, previous, item_id, title, 100, reviews=20,
+                keyword_id=keyword.id,
+            )
+            self._snapshot(
+                db, current, item_id, title, 110, reviews=21,
+                keyword_id=keyword.id,
+            )
+
+        # Strong growth in unrelated categories must not enter the localized temporal signal.
+        for item_id, title in (("henna", "Henna Nail Art Kit"), ("moxa", "Moxibustion Health Patch")):
+            self._snapshot(db, previous, item_id, title, 10, keyword_id=keyword.id)
+            self._snapshot(db, current, item_id, title, 1010, keyword_id=keyword.id)
+        db.commit()
+
+        trend = build_keyword_trend(db, keyword.id)
+        self.assertEqual(trend["status"], "usable")
+        self.assertEqual(trend["overall"]["current_items"], 6)
+        self.assertEqual(trend["overall"]["matched_items"], 6)
+        self.assertEqual(trend["overall"]["activity_share"], 100.0)
+        self.assertEqual(trend["overall"]["median_sold_delta"], 10.0)
         db.close()
 
 

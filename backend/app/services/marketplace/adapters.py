@@ -5,6 +5,8 @@ from dataclasses import asdict, dataclass
 from typing import Any, Iterable
 from urllib.parse import quote, urlparse
 
+from app.services.marketplace.query_localization import marketplace_search_term
+
 
 class VerificationRequired(RuntimeError):
     def __init__(self, platform: str, url: str):
@@ -77,11 +79,20 @@ def parse_compact_count(value: Any) -> int | None:
     if value is None:
         return None
     text = str(value).strip().lower().replace(",", "")
-    match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*([km]?)", text)
+    match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*([km千萬万亿億]?)", text)
     if not match:
         return None
     number = float(match.group(1))
-    multiplier = {"": 1, "k": 1_000, "m": 1_000_000}[match.group(2)]
+    multiplier = {
+        "": 1,
+        "k": 1_000,
+        "千": 1_000,
+        "萬": 10_000,
+        "万": 10_000,
+        "m": 1_000_000,
+        "亿": 100_000_000,
+        "億": 100_000_000,
+    }[match.group(2)]
     return int(number * multiplier)
 
 
@@ -121,6 +132,10 @@ def _clean_location(value: Any, title: str = "") -> str | None:
         return None
     if re.search(r"(?:sold|terjual|reviews?|ratings|ulasan|penilaian)", text, re.I):
         return None
+    if re.search(r"(?:已售(?:出)?|售出|销量|銷量|^售\s*[0-9])", text, re.I):
+        return None
+    if text in {"找相似", "相似商品", "similar"}:
+        return None
     if re.fullmatch(r"[0-5](?:\.[0-9])?", text):
         return None
     return text[:200]
@@ -129,9 +144,11 @@ def _clean_location(value: Any, title: str = "") -> str | None:
 # A singular label such as "4.8 rating" normally describes the score, not a count.
 _REVIEW_PATTERNS = (
     r"([0-9,.]+\s*[km]?\s*\+?)\s*(?:reviews?|ratings|ulasan|penilaian)\b",
+    r"(?m)^\s*\(([0-9,.]+\s*[km千萬万亿億]?\s*\+?)\)\s*$",
 )
 _SOLD_PATTERNS = (
     r"([0-9,.]+\s*[km]?\s*\+?)\s*(?:sold|terjual)\b",
+    r"(?:已售(?:出)?|售出|销量|銷量|售)\s*([0-9,.]+\s*[km千萬万亿億]?\s*\+?)(?:\s*件)?",
 )
 
 
@@ -139,7 +156,7 @@ class MarketplaceAdapter:
     platform: str
     blocked_hosts: tuple[str, ...] = ()
 
-    def search_url(self, keyword: str) -> str:
+    def search_url(self, keyword: str, page: int = 1) -> str:
         raise NotImplementedError
 
     @property
@@ -189,38 +206,52 @@ class ShopeeMalaysiaAdapter(MarketplaceAdapter):
     platform = "shopee"
     blocked_hosts = ("xiapibuy.com",)
 
-    def search_url(self, keyword: str) -> str:
-        return f"https://shopee.com.my/search?keyword={quote(keyword)}"
+    def search_url(self, keyword: str, page: int = 1) -> str:
+        localized = marketplace_search_term(keyword)
+        page_index = max(1, int(page)) - 1
+        return f"https://shopee.com.my/search?keyword={quote(localized)}&page={page_index}"
 
     @property
     def extraction_script(self) -> str:
-        return r"""() => Array.from(document.querySelectorAll('a[href*="-i."]')).map(a => {
-          const card = a.closest('[data-sqe="item"]') || a.closest('li') || a.parentElement?.parentElement;
+        return r"""() => {
+          const cards = Array.from(document.querySelectorAll('[data-sqe="item"]'));
+          const pageSize = cards.length;
+          return cards.map((card, pageIndex) => {
+          const a = card.querySelector('a[href*="-i."]');
+          if (!a) return null;
           const text = (card?.innerText || a.innerText || '').trim();
           const lines = text.split('\n').map(x => x.trim()).filter(Boolean);
           const image = card?.querySelector('img');
           const href = a.href;
           const id = href.match(/-i\.(\d+)\.(\d+)/);
           const title = a.getAttribute('aria-label') || a.title || lines[0] || '';
-          const ratingNode = card?.querySelector('[aria-label*="rating" i], [aria-label*="star" i], [class*="rating" i]');
+          const ratingNode = card?.querySelector('img[alt*="rating-star" i], [aria-label*="rating" i], [aria-label*="star" i], [class*="rating" i]');
           const ratingText = (ratingNode?.getAttribute('aria-label') || ratingNode?.textContent || '').trim();
           const ratingArea = ratingNode ? (ratingNode.parentElement?.innerText || '') : '';
           const price = text.match(/RM\s*[0-9,.]+/i)?.[0] || null;
-          const sold = text.match(/[0-9,.]+\s*[km]?\s*\+?\s*(?:sold|terjual)\b/i)?.[0] || null;
+          const sold = text.match(/[0-9,.]+\s*[km]?\s*\+?\s*(?:sold|terjual)\b/i)?.[0]
+            || text.match(/(?:已售(?:出)?|销量|銷量|售)\s*[0-9,.]+\s*(?:[km千萬万亿億])?\s*\+?\s*(?:件)?/i)?.[0] || null;
           const reviews = ratingArea.match(/\(([0-9,.]+\s*[km]?\s*\+?)\)/)?.[1]
-            || text.match(/([0-9,.]+\s*[km]?\s*\+?)\s*(?:reviews?|ratings|ulasan|penilaian)\b/i)?.[1] || null;
+            || text.match(/([0-9,.]+\s*[km]?\s*\+?)\s*(?:reviews?|ratings|ulasan|penilaian)\b/i)?.[1]
+            || text.match(/^\s*\(([0-9,.]+\s*[km千萬万亿億]?\s*\+?)\)\s*$/im)?.[1] || null;
           const rating = ratingText.match(/\b[0-5](?:\.[0-9])?\b/)?.[0]
+            || ratingArea.match(/(?:^|\n)\s*([0-5](?:\.[0-9])?)\s*(?:\n|$)/)?.[1]
             || text.match(/(?:rating|rated|bintang)\s*[:\-]?\s*([0-5](?:\.[0-9])?)/i)?.[1] || null;
           const location = [...lines].reverse().find(line => line !== title
-            && !/^(?:sponsored|iklan|ad|advertisement)$/i.test(line)
+            && !/^(?:sponsored|iklan|ad|advertisement|广告|廣告)$/i.test(line)
             && !/^RM\s*[0-9]/i.test(line)
             && !/(?:sold|terjual|reviews?|ratings|ulasan|penilaian)/i.test(line)
+            && !/(?:已售(?:出)?|销量|銷量|^售\s*[0-9])/i.test(line)
+            && !/^(?:找相似|相似商品|similar)$/i.test(line)
+            && !/^\([0-9,.]+\s*[km千萬万亿億]?\s*\+?\)$/.test(line)
             && !/^[0-5](?:\.[0-9])?$/.test(line)) || null;
           return {href, text, title,
             image: image?.currentSrc || image?.src || null, price, sold, rating, reviews,
             seller: null, location,
-            sponsored: /sponsored|iklan/i.test(text), shop_id: id?.[1] || null, item_id: id?.[2] || null};
-        })"""
+            sponsored: /sponsored|iklan|广告|廣告/i.test(text), shop_id: id?.[1] || null,
+            item_id: id?.[2] || null, page_position: pageIndex + 1, page_size: pageSize};
+          }).filter(Boolean);
+        }"""
 
     def parse_card(self, raw: dict[str, Any], rank: int) -> MarketplaceListing | None:
         href = str(raw.get("href") or "")
@@ -230,6 +261,7 @@ class ShopeeMalaysiaAdapter(MarketplaceAdapter):
             return None
         text = str(raw.get("text") or "")
         title = str(raw.get("title") or "").strip()
+        title = re.sub(r"^view product:\s*", "", title, flags=re.I)
         if not title or title.lower().startswith("rm"):
             lines = [line.strip() for line in text.splitlines() if line.strip()]
             title = next((line for line in lines if not re.match(r"^(RM|[0-9.]+\s*(sold|terjual))", line, re.I)), "")
@@ -266,13 +298,28 @@ class LazadaMalaysiaAdapter(MarketplaceAdapter):
     platform = "lazada"
     blocked_hosts = ("acs-m.lazada.com.my",)
 
-    def search_url(self, keyword: str) -> str:
-        return f"https://www.lazada.com.my/catalog/?q={quote(keyword)}"
+    def search_url(self, keyword: str, page: int = 1) -> str:
+        localized = marketplace_search_term(keyword)
+        suffix = f"&page={max(1, int(page))}" if page > 1 else ""
+        return f"https://www.lazada.com.my/catalog/?q={quote(localized)}{suffix}"
 
     @property
     def extraction_script(self) -> str:
-        return r"""() => Array.from(document.querySelectorAll('a[href*="/products/"]')).map(a => {
-          const card = a.closest('[data-item-id]') || a.closest('[class*="Bm3ON"]') || a.closest('div[data-qa-locator="product-item"]') || a.parentElement?.parentElement;
+        return r"""() => {
+          const seenCards = new Set();
+          const entries = [];
+          for (const a of Array.from(document.querySelectorAll('a[href*="/products/"]'))) {
+            const card = a.closest('[data-item-id]') || a.closest('[class*="Bm3ON"]') || a.closest('div[data-qa-locator="product-item"]') || a.parentElement?.parentElement;
+            if (!card || seenCards.has(card)) continue;
+            seenCards.add(card);
+            entries.push({a, card});
+          }
+          const listNumbers = entries.map(({card}) => {
+            const raw = card.getAttribute('data-listno') || card.querySelector('[data-listno]')?.getAttribute('data-listno');
+            return raw == null || raw === '' ? null : Number(raw);
+          }).filter(value => Number.isFinite(value));
+          const pageSize = listNumbers.length ? Math.max(...listNumbers) + 1 : entries.length;
+          return entries.map(({a, card}, fallbackIndex) => {
           const text = (card?.innerText || a.innerText || '').trim();
           const lines = text.split('\n').map(x => x.trim()).filter(Boolean);
           const image = card?.querySelector('img');
@@ -283,23 +330,33 @@ class LazadaMalaysiaAdapter(MarketplaceAdapter):
           const ratingText = (ratingNode?.getAttribute('aria-label') || ratingNode?.textContent || '').trim();
           const ratingArea = ratingNode ? (ratingNode.parentElement?.innerText || '') : '';
           const prices = Array.from(text.matchAll(/RM\s*[0-9,.]+/ig));
+          const listNoRaw = card.getAttribute('data-listno') || card.querySelector('[data-listno]')?.getAttribute('data-listno');
+          const listNo = listNoRaw == null || listNoRaw === '' ? null : Number(listNoRaw);
+          const pagePosition = Number.isFinite(listNo) ? listNo + 1 : fallbackIndex + 1;
           const location = [...lines].reverse().find(line => line !== title
-            && !/^(?:sponsored|iklan|ad|advertisement)$/i.test(line)
+            && !/^(?:sponsored|iklan|ad|advertisement|广告|廣告)$/i.test(line)
             && !/^RM\s*[0-9]/i.test(line)
             && !/(?:sold|terjual|reviews?|ratings|ulasan|penilaian)/i.test(line)
+            && !/(?:已售(?:出)?|销量|銷量|^售\s*[0-9])/i.test(line)
+            && !/^(?:找相似|相似商品|similar)$/i.test(line)
+            && !/^\([0-9,.]+\s*[km千萬万亿億]?\s*\+?\)$/.test(line)
             && !/^[0-5](?:\.[0-9])?$/.test(line)) || null;
           return {href, text, title,
             image: image?.currentSrc || image?.src || null,
             price: prices[0]?.[0] || null,
             original_price: prices[1]?.[0] || null,
-            sold: text.match(/[0-9,.]+\s*[km]?\s*\+?\s*(?:sold|terjual)\b/i)?.[0] || null,
+            sold: text.match(/[0-9,.]+\s*[km]?\s*\+?\s*(?:sold|terjual)\b/i)?.[0]
+              || text.match(/(?:已售(?:出)?|销量|銷量|售)\s*[0-9,.]+\s*(?:[km千萬万亿億])?\s*\+?\s*(?:件)?/i)?.[0] || null,
             rating: ratingText.match(/\b[0-5](?:\.[0-9])?\b/)?.[0]
               || text.match(/(?:rating|rated|bintang)\s*[:\-]?\s*([0-5](?:\.[0-9])?)/i)?.[1] || null,
             reviews: ratingArea.match(/\(([0-9,.]+\s*[km]?\s*\+?)\)/)?.[1]
-              || text.match(/([0-9,.]+\s*[km]?\s*\+?)\s*(?:reviews?|ratings|ulasan|penilaian)\b/i)?.[1] || null,
+              || text.match(/([0-9,.]+\s*[km]?\s*\+?)\s*(?:reviews?|ratings|ulasan|penilaian)\b/i)?.[1]
+              || text.match(/^\s*\(([0-9,.]+\s*[km千萬万亿億]?\s*\+?)\)\s*$/im)?.[1] || null,
             seller: null, location,
-            sponsored: /sponsored|iklan/i.test(text), item_id: itemId || null, shop_id: null};
-        })"""
+            sponsored: /sponsored|iklan|广告|廣告/i.test(text), item_id: itemId || null,
+            shop_id: null, page_position: pagePosition, page_size: pageSize};
+          });
+        }"""
 
     def parse_card(self, raw: dict[str, Any], rank: int) -> MarketplaceListing | None:
         href = str(raw.get("href") or "")

@@ -84,10 +84,10 @@ class ReportFormulaSafetyTests(unittest.TestCase):
         self.assertTrue(any(value.startswith("'=WEBSERVICE") for value in recommendation_cells))
 
         shopee = workbook["Shopee竞品"]
-        self.assertTrue(str(shopee["B2"].value).startswith("'="))
-        self.assertNotEqual(shopee["B2"].data_type, "f")
-        self.assertTrue(str(shopee["I2"].value).startswith("'+"))
-        self.assertTrue(str(shopee["J2"].value).startswith("'@"))
+        self.assertTrue(str(shopee["D2"].value).startswith("'="))
+        self.assertNotEqual(shopee["D2"].data_type, "f")
+        self.assertTrue(str(shopee["K2"].value).startswith("'+"))
+        self.assertTrue(str(shopee["L2"].value).startswith("'@"))
 
         trend = workbook["每日价格与排名趋势"]
         self.assertTrue(str(trend["D2"].value).startswith("'="))

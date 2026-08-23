@@ -62,9 +62,19 @@ def build_report(db: Session, run: AnalysisRun) -> BytesIO:
     _append(summary, ["数据口径", "公开搜索结果快照；不是利润、真实月销量或转化率预测。"])
     request_config = analysis.get("request_config") or {}
     if request_config:
+        per_page = request_config.get("results_limit", "—")
+        pages = request_config.get("search_pages", 1)
+        maximum = request_config.get("max_results_per_platform")
+        if maximum is None and isinstance(per_page, int) and isinstance(pages, int):
+            maximum = per_page * pages
         _append(summary, [
             "本次扫描配置",
-            f"平台 {', '.join(request_config.get('platforms') or [])}；每平台上限 {request_config.get('results_limit', '—')} 条",
+            f"平台 {', '.join(request_config.get('platforms') or [])}；前 {pages} 页；"
+            f"每页最多 {per_page} 条；每平台最多 {maximum or '—'} 条",
+        ])
+        _append(summary, [
+            "平台实际搜索词",
+            request_config.get("marketplace_query") or request_config.get("keyword") or "—",
         ])
     for platform, score in (run.platform_scores or {}).items():
         platform_score = score.get("score") if score.get("eligible", True) else "—"
@@ -86,13 +96,16 @@ def build_report(db: Session, run: AnalysisRun) -> BytesIO:
     summary.column_dimensions["A"].width = 22
     summary.column_dimensions["B"].width = 100
 
-    columns = ["排名", "商品", "价格(MYR)", "原价(MYR)", "折扣(%)", "公开已售", "评分", "评论数", "店铺", "地区", "广告", "链接", "采集时间"]
+    columns = ["平台位次", "页码", "页内位次", "商品", "价格(MYR)", "原价(MYR)", "折扣(%)", "公开已售", "评分", "评论数", "店铺", "地区", "广告", "链接", "采集时间"]
     for platform in ("shopee", "lazada"):
         ws = wb.create_sheet(f"{platform.title()}竞品")
         _header(ws, columns)
         for item in [row for row in rows if row.platform == platform]:
             _append(ws, [
-                item.search_rank, item.title, item.price if item.price is not None else "—",
+                item.search_rank,
+                (item.raw_data or {}).get("search_page", "—"),
+                (item.raw_data or {}).get("page_rank", "—"),
+                item.title, item.price if item.price is not None else "—",
                 item.original_price if item.original_price is not None else "—",
                 item.discount_percent if item.discount_percent is not None else "—",
                 item.sold_count if item.sold_count is not None else "—",
@@ -102,11 +115,14 @@ def build_report(db: Session, run: AnalysisRun) -> BytesIO:
                 "是" if item.is_sponsored is True else "否" if item.is_sponsored is False else "—",
                 item.product_url, item.collected_at.isoformat() if item.collected_at else "—",
             ])
-        ws.column_dimensions["B"].width = 55
-        ws.column_dimensions["L"].width = 55
+        ws.column_dimensions["A"].width = 12
+        ws.column_dimensions["B"].width = 8
+        ws.column_dimensions["C"].width = 12
+        ws.column_dimensions["D"].width = 55
+        ws.column_dimensions["N"].width = 55
 
     trend = wb.create_sheet("每日价格与排名趋势")
-    _header(trend, ["采集时间", "平台", "商品ID", "商品", "价格(MYR)", "公开已售", "评论数", "搜索排名"])
+    _header(trend, ["采集时间", "平台", "商品ID", "商品", "价格(MYR)", "公开已售", "评论数", "平台位次", "页码", "页内位次"])
     history = (
         db.query(ListingSnapshot)
         .join(AnalysisRun, ListingSnapshot.run_id == AnalysisRun.id)
@@ -118,7 +134,7 @@ def build_report(db: Session, run: AnalysisRun) -> BytesIO:
         .all()
     )
     for item in history:
-        _append(trend, [item.collected_at.isoformat() if item.collected_at else "—", item.platform, item.item_id, item.title, item.price if item.price is not None else "—", item.sold_count if item.sold_count is not None else "—", item.review_count if item.review_count is not None else "—", item.search_rank])
+        _append(trend, [item.collected_at.isoformat() if item.collected_at else "—", item.platform, item.item_id, item.title, item.price if item.price is not None else "—", item.sold_count if item.sold_count is not None else "—", item.review_count if item.review_count is not None else "—", item.search_rank, (item.raw_data or {}).get("search_page", "—"), (item.raw_data or {}).get("page_rank", "—")])
 
     notes = wb.create_sheet("数据口径说明")
     _append(notes, ["字段", "说明"])
@@ -129,6 +145,7 @@ def build_report(db: Session, run: AnalysisRun) -> BytesIO:
     _append(notes, ["缺失值", "公开页面未提供的字段不会填0，也不会把剩余权重放大；证据不足时不输出强结论。"])
     _append(notes, ["相关性", "低关键词相关性的搜索漂移结果会保留在原始快照，但从机会评分样本中排除。"])
     _append(notes, ["趋势", "仅纳入 completed/partial 任务；运行中、验证码暂停与失败任务的恢复 checkpoint 不进入趋势。"])
+    _append(notes, ["平台位次", "按当页 DOM 页内位次与页面容量换算；同时保留页码和页内位次，页面未完整采集时任务标记为部分完成。"])
     _append(notes, ["跨平台", "所选平台分别评分；原始已售数字不直接跨平台比较。"])
     _append(notes, ["单元格安全", "用户输入与平台公开文本统一按文本写入；以 =、+、-、@ 开头的字符串不会作为 Excel 公式执行。"])
 
