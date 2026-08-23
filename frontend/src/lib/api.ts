@@ -1,6 +1,5 @@
 const BASE = "/api";
 
-/** Global event: dispatched on 401 so the app can redirect to login */
 export const AUTH_EXPIRED_EVENT = "auth:expired";
 
 export function hasAuthToken(): boolean {
@@ -15,44 +14,29 @@ export class UnauthorizedError extends Error {
   }
 }
 
-/**
- * Handle 401 response: clear invalid token and dispatch event for redirect.
- */
 export function clearAuthOn401(): void {
   const token = localStorage.getItem("token");
   if (token) {
     localStorage.removeItem("token");
     localStorage.removeItem("user_name");
     localStorage.removeItem("user_email");
-    // Notify the app that auth has expired so it can redirect to login
     window.dispatchEvent(new CustomEvent(AUTH_EXPIRED_EVENT));
   }
 }
 
-/**
- * Redirect to login page. Called by the global event listener or directly.
- */
 export function redirectToLogin(delayMs = 0): void {
   const currentPath = window.location.pathname;
   if (currentPath !== "/login") {
     if (delayMs > 0) {
-      setTimeout(() => {
-        window.location.href = "/login?reason=expired";
-      }, delayMs);
+      setTimeout(() => { window.location.href = "/login?reason=expired"; }, delayMs);
     } else {
       window.location.href = "/login?reason=expired";
     }
   }
 }
 
-/**
- * Install a global listener for auth-expired events.
- * Call once during app initialization (in main.tsx or App.tsx).
- */
 export function installAuthExpiredListener(): () => void {
-  const handler = () => {
-    redirectToLogin(500);
-  };
+  const handler = () => redirectToLogin(500);
   window.addEventListener(AUTH_EXPIRED_EVENT, handler);
   return () => window.removeEventListener(AUTH_EXPIRED_EVENT, handler);
 }
@@ -65,54 +49,48 @@ function headers() {
   };
 }
 
-export async function apiGet<T = any>(url: string): Promise<T> {
-  const res = await fetch(`${BASE}${url}`, { headers: headers() });
+function detailText(detail: unknown): string | null {
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    const messages = detail.map((item: any) => item?.msg || item?.message).filter(Boolean);
+    return messages.length ? messages.join("；") : null;
+  }
+  return null;
+}
+
+async function responseError(res: Response): Promise<Error> {
+  const data = await res.json().catch(() => ({} as any));
+  const message = detailText(data?.detail) || detailText(data?.message) || `HTTP ${res.status}`;
+  return new Error(message);
+}
+
+async function parseResponse<T>(res: Response): Promise<T> {
   if (res.status === 401) {
     clearAuthOn401();
     throw new UnauthorizedError();
   }
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.detail || data.message || `HTTP ${res.status}`);
-  }
+  if (!res.ok) throw await responseError(res);
   return res.json();
+}
+
+export async function apiGet<T = any>(url: string): Promise<T> {
+  return parseResponse<T>(await fetch(`${BASE}${url}`, { headers: headers() }));
 }
 
 export async function apiPatch<T = any>(url: string, body: any): Promise<T> {
-  const res = await fetch(`${BASE}${url}`, { method: "PATCH", headers: headers(), body: JSON.stringify(body) });
-  if (res.status === 401) { clearAuthOn401(); throw new UnauthorizedError(); }
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.detail || data.message || `HTTP ${res.status}`);
-  }
-  return res.json();
+  return parseResponse<T>(await fetch(`${BASE}${url}`, { method: "PATCH", headers: headers(), body: JSON.stringify(body) }));
 }
 
 export async function apiPost<T = any>(url: string, body?: any): Promise<T> {
-  const res = await fetch(`${BASE}${url}`, {
+  return parseResponse<T>(await fetch(`${BASE}${url}`, {
     method: "POST",
     headers: headers(),
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (res.status === 401) {
-    clearAuthOn401();
-    throw new UnauthorizedError();
-  }
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+    body: body === undefined ? undefined : JSON.stringify(body),
+  }));
 }
 
 export async function apiDelete<T = any>(url: string): Promise<T> {
-  const res = await fetch(`${BASE}${url}`, {
-    method: "DELETE",
-    headers: headers(),
-  });
-  if (res.status === 401) {
-    clearAuthOn401();
-    throw new UnauthorizedError();
-  }
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+  return parseResponse<T>(await fetch(`${BASE}${url}`, { method: "DELETE", headers: headers() }));
 }
 
 export function downloadBlob(url: string, filename: string) {
@@ -127,9 +105,19 @@ export function downloadBlob(url: string, filename: string) {
 export async function downloadAuthorized(url: string, filename: string) {
   const token = localStorage.getItem("token");
   const res = await fetch(`${BASE}${url}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
-  if (!res.ok) throw new Error(`下载失败：HTTP ${res.status}`);
+  if (res.status === 401) {
+    clearAuthOn401();
+    throw new UnauthorizedError();
+  }
+  if (!res.ok) throw await responseError(res);
   const blob = await res.blob();
   const href = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = href; a.download = filename; a.click(); URL.revokeObjectURL(href);
+  try {
+    const a = document.createElement("a");
+    a.href = href;
+    a.download = filename;
+    a.click();
+  } finally {
+    URL.revokeObjectURL(href);
+  }
 }
