@@ -17,9 +17,11 @@ export default function Tracking() {
   const load = useCallback(() => apiGet<any>("/keywords").then((r) => setKeywords(r.data || [])), []);
 
   useEffect(() => {
-    load();
-    const timer = setInterval(load, 3000);
-    return () => clearInterval(timer);
+    load().catch(() => {});
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") load().catch(() => {});
+    }, 3000);
+    return () => window.clearInterval(timer);
   }, [load]);
 
   const action = async (fn: () => Promise<any>, ok: string) => {
@@ -45,7 +47,7 @@ export default function Tracking() {
 
   return <div className="page-stack">
     <section className="section-heading">
-      <div><span className="eyebrow">DAILY COLLECTION QUEUE</span><h2>每日跟踪</h2><p>所有关键词串行运行，避免同时请求两个平台。</p></div>
+      <div><span className="eyebrow">DAILY COLLECTION QUEUE</span><h2>每日跟踪</h2><p>所有关键词串行运行，避免同时请求两个平台；页面不可见时暂停前端轮询，后台采集不受影响。</p></div>
       <div className="schedule-stamp"><Clock3 /><span>调度方式</span><strong>按关键词计划</strong></div>
     </section>
 
