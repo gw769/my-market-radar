@@ -19,7 +19,10 @@ def samples(count: int, sold_base: int = 100, title: str = "water bottle stainle
 
 class ScoringTests(unittest.TestCase):
     def test_missing_core_values_never_produce_strong_verdict(self):
-        missing = score_platform([{"title": "water bottle", "price": 15 + index} for index in range(20)], keyword="water bottle")
+        missing = score_platform(
+            [{"title": "water bottle", "price": 15 + index} for index in range(20)],
+            keyword="water bottle",
+        )
         self.assertFalse(missing["eligible"])
         self.assertEqual(missing["verdict"], "数据不足")
         self.assertIn("销量/评论需求证据不足", missing["eligibility_reasons"])
@@ -37,10 +40,13 @@ class ScoringTests(unittest.TestCase):
         self.assertNotEqual(result["verdict"], "数据不足")
 
     def test_all_selected_platforms_must_be_eligible(self):
-        result = build_analysis("water bottle", {
-            "shopee": samples(15),
-            "lazada": [{"title": "water bottle", "price": 10 + i} for i in range(15)],
-        })
+        result = build_analysis(
+            "water bottle",
+            {
+                "shopee": samples(15),
+                "lazada": [{"title": "water bottle", "price": 10 + i} for i in range(15)],
+            },
+        )
         self.assertIsNone(result["opportunity_score"])
         self.assertEqual(result["verdict"], "数据不足")
 
@@ -50,6 +56,30 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(result["raw_sample_size"], 20)
         self.assertEqual(result["sample_size"], 10)
         self.assertEqual(result["excluded_irrelevant"], 10)
+        self.assertEqual(result["exclusion_breakdown"]["low_relevance"], 10)
+
+    def test_accessory_with_exact_keyword_is_excluded(self):
+        items = samples(10) + samples(6, title="silicone cover for water bottle")
+        result = score_platform(items, keyword="water bottle")
+        self.assertEqual(result["sample_size"], 10)
+        self.assertEqual(result["exclusion_breakdown"]["accessory"], 6)
+        self.assertLess(relevance_score("water bottle", "water bottle replacement lid"), 0.6)
+
+    def test_product_with_included_accessory_is_not_misclassified(self):
+        self.assertEqual(relevance_score("water bottle", "water bottle with cover 1L"), 1.0)
+        self.assertEqual(relevance_score("water bottle", "water bottle with strap 750ml"), 1.0)
+
+    def test_multipacks_do_not_distort_unit_price_scoring(self):
+        items = samples(10) + samples(5, title="2pcs water bottle bundle")
+        result = score_platform(items, keyword="water bottle")
+        self.assertEqual(result["sample_size"], 10)
+        self.assertEqual(result["exclusion_breakdown"]["bundle"], 5)
+        self.assertLess(relevance_score("water bottle", "2pcs water bottle bundle"), 0.6)
+        self.assertEqual(relevance_score("water bottle set", "2pcs water bottle set"), 1.0)
+
+    def test_single_ascii_token_requires_token_boundary(self):
+        self.assertEqual(relevance_score("pen", "ballpoint pen blue"), 1.0)
+        self.assertLess(relevance_score("pen", "pencil case"), 0.6)
 
     def test_relevance_guard_requires_phrase_evidence(self):
         self.assertEqual(relevance_score("water bottle", "water bottle stainless 1L"), 1.0)
