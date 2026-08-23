@@ -8,6 +8,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.security import get_current_user
 from app.models.marketplace import AnalysisRun, ListingSnapshot, TrackedKeyword
@@ -18,6 +19,7 @@ from app.services.marketplace.runner import create_run, open_verification_browse
 from app.services.marketplace.scheduler import next_run_utc
 
 router = APIRouter(prefix="/api", tags=["Malaysia marketplace intelligence"])
+settings = get_settings()
 
 
 def _iso(value):
@@ -85,6 +87,21 @@ def _apply_keyword_settings(keyword: TrackedKeyword, payload: KeywordCreate) -> 
     keyword.daily_time = payload.daily_time
     keyword.timezone = payload.timezone
     keyword.next_run_at = next_run_utc(payload.daily_time, payload.timezone) if payload.tracking_enabled else None
+
+
+@router.get("/marketplace-defaults")
+def marketplace_defaults(current_user: User = Depends(get_current_user)):
+    # Keep runtime defaults in one place. The frontend previously hardcoded 20 / 20:00 /
+    # Asia/Kuala_Lumpur, so changing .env silently had no effect on newly created keywords.
+    return {
+        "success": True,
+        "data": {
+            "results_limit": settings.DEFAULT_RESULTS_LIMIT,
+            "daily_time": settings.DEFAULT_DAILY_TIME,
+            "timezone": settings.DEFAULT_TIMEZONE,
+            "platforms": ["shopee", "lazada"],
+        },
+    }
 
 
 @router.post("/keywords")
@@ -191,15 +208,11 @@ def resume_run(run_id: int, db: Session = Depends(get_db), current_user: User = 
         raise HTTPException(status_code=409, detail="当前任务不能继续")
 
     if run.status in ("failed", "partial"):
-        # A retry is a new attempt. Reusing the same row erased the old result, timestamps and
-        # snapshots, which made history/trends impossible to trust.
         keyword = run.tracked_keyword
         retry = create_run(db, keyword, trigger="retry")
         queued = submit_run(retry.id)
         return {"success": True, "queued": queued, "run": _run_payload(retry), "retry_of": run.id}
 
-    # Verification is a pause inside the same attempt, so continue the same run. submit_run()
-    # is race-safe if the previous worker is still leaving the in-memory queue.
     run.status = "pending"
     run.progress = 0
     run.current_step = "等待验证后重新采集"
