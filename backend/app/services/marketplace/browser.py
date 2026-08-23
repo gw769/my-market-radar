@@ -12,6 +12,11 @@ from typing import Any
 from urllib.parse import quote as urlquote, urlparse
 
 from app.core.config import get_settings
+from app.services.marketplace.extension_bridge import (
+    ExtensionBridgeError,
+    extension_ready,
+    extension_request,
+)
 
 settings = get_settings()
 
@@ -25,6 +30,8 @@ def cdp_url() -> str:
 
 
 def browser_ready(timeout: float = 0.5) -> bool:
+    if settings.BROWSER_MODE == "extension":
+        return extension_ready()
     try:
         with urllib.request.urlopen(f"{cdp_url()}/json/version", timeout=timeout) as response:
             return response.status == 200
@@ -95,6 +102,11 @@ def ensure_browser(initial_urls: list[str] | None = None) -> None:
     if browser_ready():
         return
 
+    if settings.BROWSER_MODE == "extension":
+        raise BrowserLaunchError(
+            "主 Google Chrome 扩展尚未连接。请保持你的 Chrome 打开，并确认 MY Market Radar Browser Bridge 已加载。"
+        )
+
     executable = find_chrome_executable()
     if not executable:
         raise BrowserLaunchError(
@@ -149,6 +161,12 @@ def ensure_browser(initial_urls: list[str] | None = None) -> None:
 def list_tabs() -> list[dict[str, Any]]:
     if not browser_ready():
         return []
+    if settings.BROWSER_MODE == "extension":
+        try:
+            payload = extension_request("tabs", timeout=5)
+            return payload if isinstance(payload, list) else []
+        except ExtensionBridgeError:
+            return []
     try:
         with urllib.request.urlopen(f"{cdp_url()}/json/list", timeout=2) as response:
             payload = json.load(response)
@@ -254,6 +272,12 @@ def find_platform_tab(platform: str, prefer_verification: bool = True) -> dict[s
 
 def new_tab(url: str) -> dict[str, Any] | None:
     ensure_browser()
+    if settings.BROWSER_MODE == "extension":
+        try:
+            payload = extension_request("new_tab", timeout=10, url=url)
+            return payload if isinstance(payload, dict) else None
+        except ExtensionBridgeError as exc:
+            raise BrowserLaunchError(f"无法在你的 Chrome 中打开标签页：{exc}") from exc
     request = urllib.request.Request(
         f"{cdp_url()}/json/new?{urlquote(url, safe='')}",
         method="PUT",
@@ -280,6 +304,11 @@ def ensure_platform_tab(platform: str, url: str) -> dict[str, Any]:
 def activate_tab(tab_id: str) -> bool:
     if not tab_id:
         return False
+    if settings.BROWSER_MODE == "extension":
+        try:
+            return bool(extension_request("activate_tab", timeout=5, tab_id=tab_id))
+        except ExtensionBridgeError:
+            return False
     try:
         with urllib.request.urlopen(f"{cdp_url()}/json/activate/{tab_id}", timeout=2):
             return True

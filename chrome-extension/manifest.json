@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "MY Market Radar Browser Bridge",
+  "version": "1.0.1",
+  "description": "Lets the local MY Market Radar use your signed-in Shopee and Lazada tabs.",
+  "permissions": ["tabs", "debugger", "alarms"],
+  "host_permissions": [
+    "http://127.0.0.1:9232/*",
+    "https://*.shopee.com.my/*",
+    "https://*.xiapibuy.com/*",
+    "https://*.lazada.com.my/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "MY Market Radar 已连接"
+  }
+}

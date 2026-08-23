@@ -29,6 +29,7 @@ from app.services.marketplace.browser import (
 )
 from app.services.marketplace.calibration import calibrate_analysis
 from app.services.marketplace.evidence import build_evidence_summary
+from app.services.marketplace.extension_bridge import extension_request
 from app.services.marketplace.health import assess_collection_health, summarize_collector_health
 from app.services.marketplace.raw_collection import RawCardAccumulator
 from app.services.marketplace.scoring import build_analysis
@@ -245,6 +246,62 @@ async def _cdp_call(socket: Any, request_id: int, method: str, params: dict[str,
         return message.get("result", {})
 
 
+class _ExtensionCDPSocket:
+    """Small socket-compatible adapter over the user's main Chrome extension."""
+
+    def __init__(self, platform: str, url: str):
+        self.platform = platform
+        self.url = url
+        self.session_id = ""
+        self._responses: asyncio.Queue[str] = asyncio.Queue()
+
+    async def __aenter__(self) -> "_ExtensionCDPSocket":
+        payload = await asyncio.to_thread(
+            extension_request,
+            "attach",
+            max(10.0, float(settings.COLLECTION_TIMEOUT_SECONDS)),
+            platform=self.platform,
+            url=self.url,
+        )
+        self.session_id = str((payload or {}).get("session_id") or "")
+        if not self.session_id:
+            raise RuntimeError(f"无法连接你的 Chrome {self.platform.title()} 标签页")
+        return self
+
+    async def __aexit__(self, _exc_type: Any, _exc: Any, _tb: Any) -> None:
+        if not self.session_id:
+            return
+        try:
+            await asyncio.to_thread(
+                extension_request,
+                "detach",
+                5.0,
+                session_id=self.session_id,
+            )
+        except Exception:
+            logger.debug("主 Chrome 扩展 detach 失败 session=%s", self.session_id, exc_info=True)
+
+    async def send(self, raw_message: str) -> None:
+        message = json.loads(raw_message)
+        request_id = message.get("id")
+        try:
+            result = await asyncio.to_thread(
+                extension_request,
+                "cdp",
+                max(10.0, float(settings.COLLECTION_TIMEOUT_SECONDS)),
+                session_id=self.session_id,
+                method=str(message.get("method") or ""),
+                command_params=message.get("params") or {},
+            )
+            response = {"id": request_id, "result": result or {}}
+        except Exception as exc:
+            response = {"id": request_id, "error": {"message": str(exc)}}
+        await self._responses.put(json.dumps(response, ensure_ascii=False))
+
+    async def recv(self) -> str:
+        return await self._responses.get()
+
+
 def _runtime_value(result: dict[str, Any], default: Any = None) -> Any:
     return result.get("result", {}).get("value", default)
 
@@ -257,17 +314,21 @@ async def _collect_resident_tab(
     worker_id: str,
 ) -> tuple[str, str, list[dict[str, Any]]]:
     url = adapter.search_url(keyword)
-    tab = ensure_platform_tab(adapter.platform, url)
-    websocket_url = tab.get("webSocketDebuggerUrl")
-    if not websocket_url:
-        raise RuntimeError(f"{adapter.platform.title()} Chrome 标签页没有调试连接")
+    if settings.BROWSER_MODE == "extension":
+        socket_context: Any = _ExtensionCDPSocket(adapter.platform, url)
+    else:
+        tab = ensure_platform_tab(adapter.platform, url)
+        websocket_url = tab.get("webSocketDebuggerUrl")
+        if not websocket_url:
+            raise RuntimeError(f"{adapter.platform.title()} Chrome 标签页没有调试连接")
+        socket_context = websocket_connect(websocket_url, open_timeout=5, max_size=8 * 1024 * 1024)
 
     current_url = url
     body_text = ""
     accumulator = RawCardAccumulator(max_cards=max(200, limit * 4))
     raw_cards: list[dict[str, Any]] = []
     last_heartbeat = 0.0
-    async with websocket_connect(websocket_url, open_timeout=5, max_size=8 * 1024 * 1024) as socket:
+    async with socket_context as socket:
         request_id = 1
         await _cdp_call(socket, request_id, "Page.enable")
         request_id += 1
@@ -411,7 +472,7 @@ def _mark_verification(run_id: int, exc: VerificationRequired, worker_id: str) -
                     AnalysisRun.status: "needs_verification",
                     AnalysisRun.current_step: f"{exc.platform.title()} 需要人工验证",
                     AnalysisRun.verification_platform: exc.platform,
-                    AnalysisRun.error_message: f"{exc.platform.title()} 触发了人工验证。打开项目 Chrome 完成验证，保持该标签页和窗口打开，然后点击继续。",
+                    AnalysisRun.error_message: f"{exc.platform.title()} 触发了人工验证。请在你的 Google Chrome 完成验证，保持该标签页打开，然后点击继续。",
                     AnalysisRun.worker_id: None,
                     AnalysisRun.heartbeat_at: None,
                 },
@@ -623,7 +684,7 @@ def open_verification_browser(run_id: int) -> str:
     finally:
         db.close()
 
-    if not _visible_desktop_available():
+    if settings.BROWSER_MODE != "extension" and not _visible_desktop_available():
         raise RuntimeError("当前运行环境没有可见桌面，无法人工处理验证码。请在 Windows/macOS/Linux 桌面本机运行后继续。")
 
     if not browser_ready():

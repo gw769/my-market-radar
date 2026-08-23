@@ -48,9 +48,11 @@ class Settings(BaseSettings):
 
     BROWSER_PROFILE_DIR: str = ""
     BROWSER_EXECUTABLE: str = ""
+    BROWSER_MODE: str = "cdp"
     BROWSER_CDP_PORT: int = Field(default=9231, ge=1024, le=65535)
     BROWSER_START_TIMEOUT_SECONDS: float = Field(default=8.0, ge=1.0, le=60.0)
     BROWSER_HEADLESS_FALLBACK: bool = True
+    EXTENSION_UPDATE_BASE_URL: str = "http://127.0.0.1:8011/browser-extension"
     COLLECTION_TIMEOUT_SECONDS: int = Field(default=45, ge=5, le=120)
     RUN_HEARTBEAT_SECONDS: int = Field(default=10, ge=3, le=60)
     RUN_STALE_AFTER_SECONDS: int = Field(default=240, ge=60, le=1800)
@@ -69,6 +71,14 @@ class Settings(BaseSettings):
         normalized = str(value).strip().lower()
         if normalized not in {"sqlite", "mysql"}:
             raise ValueError("DATABASE_TYPE 仅支持 sqlite 或 mysql")
+        return normalized
+
+    @field_validator("BROWSER_MODE", mode="before")
+    @classmethod
+    def validate_browser_mode(cls, value: str) -> str:
+        normalized = str(value).strip().lower()
+        if normalized not in {"cdp", "extension"}:
+            raise ValueError("BROWSER_MODE 仅支持 cdp 或 extension")
         return normalized
 
     @field_validator("DEFAULT_DAILY_TIME")

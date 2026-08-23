@@ -89,10 +89,16 @@ class BootstrapAndConfigTests(unittest.TestCase):
             Settings(_env_file=None, DEFAULT_TIMEZONE="Not/A_Timezone")
         with self.assertRaises(ValueError):
             Settings(_env_file=None, DATABASE_TYPE="postgres")
+        with self.assertRaises(ValueError):
+            Settings(_env_file=None, BROWSER_MODE="selenium")
 
     def test_database_type_is_normalized(self):
         settings = Settings(_env_file=None, DATABASE_TYPE="MySQL")
         self.assertEqual(settings.DATABASE_TYPE, "mysql")
+
+    def test_browser_mode_is_normalized(self):
+        settings = Settings(_env_file=None, BROWSER_MODE="Extension")
+        self.assertEqual(settings.BROWSER_MODE, "extension")
 
     def test_default_malaysia_timezone_is_resolvable(self):
         settings = Settings(_env_file=None)

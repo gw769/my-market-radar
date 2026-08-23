@@ -23,6 +23,7 @@ dist/
 *.db
 *.sqlite3
 backend/data/
+chrome-extension.pem
 
 # 日志
 logs/

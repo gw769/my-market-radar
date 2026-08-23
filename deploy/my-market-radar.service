@@ -1,17 +1,15 @@
 [Unit]
 Description=MY Market Radar Shopee and Lazada analyzer
-Wants=network-online.target market-verification-browser.service
-After=network-online.target market-verification-browser.service
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 Type=simple
 User=james
 WorkingDirectory=/home/james/my-market-radar/backend
 Environment=PYTHONPATH=/home/james/my-market-radar/backend
-Environment=DISPLAY=:1
-Environment=XAUTHORITY=/run/user/1000/gdm/Xauthority
-Environment=XDG_RUNTIME_DIR=/run/user/1000
-Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+Environment=BROWSER_MODE=extension
+Environment=EXTENSION_UPDATE_BASE_URL=https://market.deepworm.bio/browser-extension
 ExecStart=/home/james/my-market-radar/backend/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8011
 Restart=always
 RestartSec=3

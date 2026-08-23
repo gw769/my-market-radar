@@ -13,7 +13,7 @@ else:
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import HTTPException as FastAPIHTTPException
 from contextlib import asynccontextmanager
@@ -25,6 +25,12 @@ import app.models  # noqa: F401 - 确保所有模型注册到 Base.metadata
 from app.api import api_router
 from app.services.marketplace.recovery import recover_interrupted_runs
 from app.services.marketplace.scheduler import start_scheduler, stop_scheduler
+from app.services.marketplace.extension_bridge import (
+    EXTENSION_CRX,
+    extension_update_manifest,
+    start_extension_bridge,
+    stop_extension_bridge,
+)
 
 settings = get_settings()
 KNOWN_INSECURE_SECRET_KEYS = {
@@ -66,11 +72,15 @@ async def lifespan(app: FastAPI):
     logger.info("数据库初始化完成")
     _ensure_default_admin()
     recover_interrupted_runs()
+    if settings.BROWSER_MODE == "extension":
+        start_extension_bridge()
     start_scheduler()
     try:
         yield
     finally:
         stop_scheduler()
+        if settings.BROWSER_MODE == "extension":
+            stop_extension_bridge()
         logger.info("应用关闭")
 
 
@@ -161,6 +171,27 @@ app.include_router(api_router)
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/browser-extension/updates.xml", include_in_schema=False)
+def browser_extension_updates():
+    return Response(
+        extension_update_manifest(settings.EXTENSION_UPDATE_BASE_URL),
+        media_type="application/xml",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/browser-extension/chrome-extension.crx", include_in_schema=False)
+def browser_extension_package():
+    if not EXTENSION_CRX.is_file():
+        return JSONResponse({"error": "extension package missing"}, status_code=404)
+    return FileResponse(
+        str(EXTENSION_CRX),
+        media_type="application/x-chrome-extension",
+        filename="chrome-extension.crx",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 if _frontend_out.exists():
