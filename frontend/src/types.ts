@@ -4,7 +4,7 @@ export interface Run {
   progress: number; current_step?: string; verification_platform?: string;
   opportunity_score?: number | null; verdict?: string; confidence?: number;
   platform_scores: Record<string, PlatformScore>; analysis: any; error_message?: string;
-  created_at?: string; completed_at?: string;
+  created_at?: string; started_at?: string; completed_at?: string;
 }
 export interface PlatformScore {
   score: number | null; verdict: string; eligible?: boolean; confidence: number; sample_size: number;
@@ -15,8 +15,9 @@ export interface PlatformScore {
   metrics: Record<string, number | null>;
 }
 export interface OpportunitySegment {
-  label: string; token?: string | null; opportunity_score: number; verdict: string;
-  confidence: number; sample_size: number; share: number; platform_coverage: number;
+  label: string; token?: string | null; opportunity_score: number; raw_opportunity_score?: number;
+  verdict: string; confidence: number; ranking_reliability?: number;
+  sample_size: number; share: number; platform_coverage: number;
   median_price?: number | null; seller_concentration?: number | null;
   representative_titles: string[]; platform_scores: Record<string, PlatformScore>;
 }
