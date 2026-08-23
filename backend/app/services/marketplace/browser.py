@@ -239,7 +239,7 @@ def _tab_priority(platform: str, tab: dict[str, Any], prefer_verification: bool)
     return 100
 
 
-def find_platform_tab(platform: str, prefer_verification: bool = False) -> dict[str, Any] | None:
+def find_platform_tab(platform: str, prefer_verification: bool = True) -> dict[str, Any] | None:
     candidates = _platform_tabs(platform)
     if not candidates:
         return None
@@ -262,7 +262,7 @@ def new_tab(url: str) -> dict[str, Any] | None:
 
 def ensure_platform_tab(platform: str, url: str) -> dict[str, Any]:
     ensure_browser([url])
-    tab = find_platform_tab(platform)
+    tab = find_platform_tab(platform, prefer_verification=False)
     if tab:
         return tab
     tab = new_tab(url)
@@ -281,7 +281,7 @@ def activate_tab(tab_id: str) -> bool:
         return False
 
 
-def activate_platform_tab(platform: str, prefer_verification: bool = False) -> bool:
+def activate_platform_tab(platform: str, prefer_verification: bool = True) -> bool:
     tab = find_platform_tab(platform, prefer_verification=prefer_verification)
     return bool(tab and activate_tab(str(tab.get("id") or "")))
 
