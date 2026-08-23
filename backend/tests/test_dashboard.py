@@ -57,9 +57,15 @@ class DashboardTests(unittest.TestCase):
             title="New 1", product_url="https://example.test/new1", search_rank=1,
         ))
 
-        # Push the verification run outside the recent-50 window.
+        # Push the verification run outside the recent-50 window. One failed legacy row keeps
+        # a stale score to prove the chart filters by terminal result status, not score alone.
         for index in range(55):
-            db.add(AnalysisRun(keyword_id=keyword.id, status="failed", error_message=f"failure-{index}"))
+            db.add(AnalysisRun(
+                keyword_id=keyword.id,
+                status="failed",
+                error_message=f"failure-{index}",
+                opportunity_score=99 if index == 54 else None,
+            ))
         db.commit()
         db.refresh(user)
 
@@ -69,6 +75,7 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(data["platform_counts"], {"shopee": 1})
         self.assertLessEqual(len(data["latest_runs"]), 8)
         self.assertLessEqual(len(data["score_history"]), 30)
+        self.assertNotIn(99, [point["score"] for point in data["score_history"]])
         db.close()
 
 
