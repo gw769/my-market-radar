@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     APP_VERSION: str = "1.0.2"
     DEBUG: bool = False
     SECRET_KEY: str = "dev-secret-key-change-in-production"
+    ALLOW_REGISTRATION: bool = False
 
     BOOTSTRAP_ADMIN_USERNAME: str = "admin"
     BOOTSTRAP_ADMIN_EMAIL: str = "admin@market.my"
