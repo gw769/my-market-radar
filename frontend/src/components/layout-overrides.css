@@ -1,3 +1,25 @@
+.table-action {
+  border: 1px solid #2a564b;
+  border-radius: 9px;
+  background: #10231e;
+  color: #b6ccc5;
+  padding: 8px 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.table-action:hover:not(:disabled) {
+  color: var(--mint);
+  border-color: #2d6657;
+}
+
+.table-action:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+
 @media (max-width: 680px) {
   .sidebar nav {
     grid-template-columns: repeat(7, minmax(0, 1fr));
