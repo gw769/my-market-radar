@@ -31,6 +31,7 @@ from app.services.marketplace.scoring import build_analysis
 settings = get_settings()
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="marketplace-collector")
 _queue_lock = threading.Lock()
+_run_creation_lock = threading.Lock()
 _queued_run_ids: set[int] = set()
 _requeue_requested: set[int] = set()
 
@@ -48,11 +49,6 @@ def _request_config(keyword: TrackedKeyword) -> dict[str, Any]:
 
 
 def _collection_request(run: AnalysisRun, keyword: TrackedKeyword) -> SimpleNamespace:
-    """Return the immutable request captured when the run was created.
-
-    Older database rows may not contain request_config, so they intentionally fall back to
-    the keyword's current settings once. New runs always persist a snapshot before queuing.
-    """
     stored = (run.analysis or {}).get("request_config") if isinstance(run.analysis, dict) else None
     config = stored if isinstance(stored, dict) else _request_config(keyword)
     platforms = [str(platform) for platform in (config.get("platforms") or []) if str(platform) in ADAPTERS]
@@ -74,30 +70,39 @@ def _collection_request(run: AnalysisRun, keyword: TrackedKeyword) -> SimpleName
 
 
 def create_run(db: Session, keyword: TrackedKeyword, trigger: str = "manual") -> AnalysisRun:
-    active = (
-        db.query(AnalysisRun)
-        .filter(
-            AnalysisRun.keyword_id == keyword.id,
-            AnalysisRun.status.in_(("pending", "running", "needs_verification")),
+    """Return the active attempt or create one exactly once within this app process.
+
+    API requests and the scheduler can reach this check concurrently. Without the lock both
+    sessions could observe "no active run" and insert separate pending attempts for one keyword.
+    The bundled deployment uses one uvicorn process, so a process-level lock closes that race;
+    a future multi-worker deployment should replace this with a database-level advisory/partial
+    unique lock.
+    """
+    with _run_creation_lock:
+        active = (
+            db.query(AnalysisRun)
+            .filter(
+                AnalysisRun.keyword_id == keyword.id,
+                AnalysisRun.status.in_(("pending", "running", "needs_verification")),
+            )
+            .order_by(AnalysisRun.id.desc())
+            .first()
         )
-        .order_by(AnalysisRun.id.desc())
-        .first()
-    )
-    if active:
-        return active
-    run = AnalysisRun(
-        keyword_id=keyword.id,
-        trigger=trigger,
-        status="pending",
-        progress=0,
-        current_step="等待采集",
-        analysis={"request_config": _request_config(keyword)},
-    )
-    keyword.last_run_at = _utcnow()
-    db.add(run)
-    db.commit()
-    db.refresh(run)
-    return run
+        if active:
+            return active
+        run = AnalysisRun(
+            keyword_id=keyword.id,
+            trigger=trigger,
+            status="pending",
+            progress=0,
+            current_step="等待采集",
+            analysis={"request_config": _request_config(keyword)},
+        )
+        keyword.last_run_at = _utcnow()
+        db.add(run)
+        db.commit()
+        db.refresh(run)
+        return run
 
 
 def _execute_queued(run_id: int) -> None:
@@ -112,9 +117,6 @@ def _execute_queued(run_id: int) -> None:
                 should_requeue = True
         if should_requeue:
             try:
-                # A resume request can arrive in the tiny window after the database was moved
-                # back to pending but before the finishing worker leaves _queued_run_ids. Queue
-                # it now that the old worker is definitely gone.
                 submit_run(run_id)
             except Exception:
                 logger.error("延迟重新入队失败 run=%s", run_id, exc_info=True)
@@ -132,10 +134,6 @@ def submit_run(run_id: int) -> bool:
 
     with _queue_lock:
         if run_id in _queued_run_ids:
-            # Treat this as accepted, not rejected. If the existing worker is only finishing a
-            # previous attempt, _execute_queued will enqueue the now-pending run immediately
-            # after removing the old queue marker. If it is still a normal pending duplicate,
-            # the later submit simply sees a terminal status and becomes a no-op.
             _requeue_requested.add(run_id)
             return True
         _queued_run_ids.add(run_id)
@@ -188,7 +186,6 @@ def _snapshot(run_id: int, keyword_id: int, platform: str, listing: MarketplaceL
 
 
 def _persist_platform(run_id: int, keyword_id: int, platform: str, listings: list[MarketplaceListing]) -> None:
-    """Checkpoint a completed platform before moving to the next one."""
     db = SessionLocal()
     try:
         db.query(ListingSnapshot).filter(
@@ -260,9 +257,6 @@ async def _collect_resident_tab(adapter: Any, keyword: str, limit: int) -> tuple
             value = _runtime_value(cards, [])
             raw_cards = value if isinstance(value, list) else []
 
-            # A marketplace card can expose multiple anchors (image/title/etc.). Counting raw
-            # anchors caused the collector to stop early with far fewer unique products than
-            # requested. Use the adapter's real deduplicated/validated result count instead.
             usable_count = len(adapter.parse_cards(raw_cards, limit))
             if usable_count >= limit:
                 break
@@ -373,7 +367,6 @@ def execute_run_sync(run_id: int) -> None:
         run.completed_at = None
         run.error_message = None
         run.verification_platform = None
-        # Persist the normalized request snapshot for legacy rows before starting collection.
         run.analysis = {**(run.analysis or {}), "request_config": collection_request.request_config}
         db.commit()
     finally:
