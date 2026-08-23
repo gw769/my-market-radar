@@ -4,6 +4,7 @@ import ProtectedRoute from "@/components/ProtectedRoute";
 import Layout from "@/components/Layout";
 import Login from "@/pages/Login";
 import Dashboard from "@/pages/Dashboard";
+import Discovery from "@/pages/Discovery";
 import Analyze from "@/pages/Analyze";
 import Tracking from "@/pages/Tracking";
 import Competitors from "@/pages/Competitors";
@@ -18,6 +19,7 @@ export default function App() {
         <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
           <Route index element={<Navigate to="/dashboard" replace />} />
           <Route path="dashboard" element={<Dashboard />} />
+          <Route path="discovery" element={<Discovery />} />
           <Route path="analyze" element={<Analyze />} />
           <Route path="tracking" element={<Tracking />} />
           <Route path="competitors" element={<Competitors />} />

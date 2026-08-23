@@ -1,9 +1,11 @@
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { BarChart3, BrainCircuit, FileSpreadsheet, LayoutDashboard, LogOut, Radar, RefreshCw, Search, Store, User } from "lucide-react";
+import { BarChart3, BrainCircuit, Compass, FileSpreadsheet, LayoutDashboard, LogOut, Radar, RefreshCw, Search, Store, User } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
+import "./layout-overrides.css";
 
 const NAV = [
   { to: "/dashboard", label: "总览", mobileLabel: "总览", Icon: LayoutDashboard },
+  { to: "/discovery", label: "机会发现", mobileLabel: "发现", Icon: Compass },
   { to: "/analyze", label: "关键词分析", mobileLabel: "分析", Icon: Search },
   { to: "/tracking", label: "每日跟踪", mobileLabel: "跟踪", Icon: RefreshCw },
   { to: "/competitors", label: "竞品对比", mobileLabel: "竞品", Icon: Store },
@@ -22,7 +24,7 @@ export default function Layout() {
         <div className="brand-block"><div className="brand-mark"><Radar size={22} /></div><div><strong>MY Market Radar</strong><span>Shopee × Lazada</span></div></div>
         <div className="market-chip"><span /> MALAYSIA · MYR</div>
         <nav>{NAV.map(({ to, label, mobileLabel, Icon }) => <NavLink key={to} to={to} className={({ isActive }) => isActive ? "nav-item active" : "nav-item"}><Icon size={18} /><span className="nav-label-full">{label}</span><span className="nav-label-mobile">{mobileLabel}</span></NavLink>)}</nav>
-        <div className="sidebar-foot"><div className="pulse-line"><span /> 每日 20:00 自动更新</div><small>公开数据情报 · UTC+8</small></div>
+        <div className="sidebar-foot"><div className="pulse-line"><span /> 按关键词计划自动更新</div><small>公开数据情报 · Malaysia UTC+8</small></div>
       </aside>
       <div className="main-column">
         <header className="topbar">
