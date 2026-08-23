@@ -1,0 +1,232 @@
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+from typing import Any
+from urllib.parse import quote as urlquote
+
+from app.core.config import get_settings
+
+settings = get_settings()
+
+
+class BrowserLaunchError(RuntimeError):
+    pass
+
+
+def cdp_url() -> str:
+    return f"http://127.0.0.1:{settings.BROWSER_CDP_PORT}"
+
+
+def browser_ready(timeout: float = 0.5) -> bool:
+    try:
+        with urllib.request.urlopen(f"{cdp_url()}/json/version", timeout=timeout) as response:
+            return response.status == 200
+    except Exception:
+        return False
+
+
+def _existing_path(value: str | os.PathLike[str] | None) -> str | None:
+    if not value:
+        return None
+    path = Path(value).expanduser()
+    return str(path) if path.is_file() else None
+
+
+def find_chrome_executable() -> str | None:
+    configured = _existing_path(settings.BROWSER_EXECUTABLE)
+    if configured:
+        return configured
+
+    for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+        found = shutil.which(name)
+        if found:
+            return found
+
+    candidates: list[Path] = []
+    if sys.platform == "win32":
+        roots = [
+            os.environ.get("LOCALAPPDATA"),
+            os.environ.get("PROGRAMFILES"),
+            os.environ.get("PROGRAMFILES(X86)"),
+        ]
+        for root in roots:
+            if root:
+                candidates.extend(
+                    [
+                        Path(root) / "Google" / "Chrome" / "Application" / "chrome.exe",
+                        Path(root) / "Chromium" / "Application" / "chrome.exe",
+                    ]
+                )
+    elif sys.platform == "darwin":
+        candidates.extend(
+            [
+                Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+                Path.home() / "Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                Path("/Applications/Chromium.app/Contents/MacOS/Chromium"),
+            ]
+        )
+    else:
+        candidates.extend(
+            [
+                Path("/opt/google/chrome/chrome"),
+                Path("/usr/bin/google-chrome"),
+                Path("/usr/bin/chromium"),
+                Path("/usr/bin/chromium-browser"),
+            ]
+        )
+
+    return next((str(path) for path in candidates if path.is_file()), None)
+
+
+def _headless_required() -> bool:
+    if sys.platform in ("win32", "darwin"):
+        return False
+    return not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+def ensure_browser(initial_urls: list[str] | None = None) -> None:
+    if browser_ready():
+        return
+
+    executable = find_chrome_executable()
+    if not executable:
+        raise BrowserLaunchError(
+            "未找到 Google Chrome/Chromium。请安装 Chrome，或通过 BROWSER_EXECUTABLE 指定浏览器路径。"
+        )
+
+    headless = _headless_required()
+    if headless and not settings.BROWSER_HEADLESS_FALLBACK:
+        raise BrowserLaunchError(
+            "当前环境没有桌面显示服务，无法启动可见 Chrome。请在桌面环境运行，或启用 BROWSER_HEADLESS_FALLBACK。"
+        )
+
+    args = [
+        executable,
+        f"--user-data-dir={settings.browser_profile_path}",
+        "--remote-debugging-address=127.0.0.1",
+        f"--remote-debugging-port={settings.BROWSER_CDP_PORT}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-background-mode",
+    ]
+    if headless:
+        args.extend(["--headless=new", "--disable-gpu"])
+    if os.name != "nt" and hasattr(os, "geteuid") and os.geteuid() == 0:
+        args.append("--no-sandbox")
+    args.extend(initial_urls or ["about:blank"])
+
+    try:
+        process = subprocess.Popen(
+            args,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=(os.name != "nt"),
+            env=os.environ.copy(),
+        )
+    except OSError as exc:
+        raise BrowserLaunchError(f"Chrome 启动失败：{exc}") from exc
+
+    deadline = time.monotonic() + settings.BROWSER_START_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if browser_ready():
+            return
+        return_code = process.poll()
+        if return_code is not None:
+            raise BrowserLaunchError(f"Chrome 启动失败：退出码 {return_code}")
+        time.sleep(0.2)
+    raise BrowserLaunchError(
+        f"Chrome 已启动，但 {settings.BROWSER_CDP_PORT} 调试端口未就绪。请关闭旧的项目浏览器窗口后重试。"
+    )
+
+
+def list_tabs() -> list[dict[str, Any]]:
+    if not browser_ready():
+        return []
+    try:
+        with urllib.request.urlopen(f"{cdp_url()}/json/list", timeout=2) as response:
+            payload = json.load(response)
+        return payload if isinstance(payload, list) else []
+    except Exception:
+        return []
+
+
+def _platform_markers(platform: str) -> tuple[str, ...]:
+    if platform == "shopee":
+        return ("shopee.com.my", "xiapibuy.com")
+    if platform == "lazada":
+        return ("lazada.com.my",)
+    return ()
+
+
+def find_platform_tab(platform: str) -> dict[str, Any] | None:
+    markers = _platform_markers(platform)
+    if not markers:
+        return None
+    return next(
+        (
+            tab
+            for tab in list_tabs()
+            if tab.get("type") == "page"
+            and any(marker in str(tab.get("url", "")).lower() for marker in markers)
+        ),
+        None,
+    )
+
+
+def new_tab(url: str) -> dict[str, Any] | None:
+    ensure_browser()
+    request = urllib.request.Request(
+        f"{cdp_url()}/json/new?{urlquote(url, safe='')}",
+        method="PUT",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=3) as response:
+            payload = json.load(response)
+        return payload if isinstance(payload, dict) else None
+    except Exception as exc:
+        raise BrowserLaunchError(f"无法在项目 Chrome 中打开标签页：{exc}") from exc
+
+
+def ensure_platform_tab(platform: str, url: str) -> dict[str, Any]:
+    ensure_browser([url])
+    tab = find_platform_tab(platform)
+    if tab:
+        return tab
+    tab = new_tab(url)
+    if not tab:
+        raise BrowserLaunchError(f"无法创建 {platform.title()} 标签页")
+    return tab
+
+
+def activate_tab(tab_id: str) -> bool:
+    if not tab_id:
+        return False
+    try:
+        with urllib.request.urlopen(f"{cdp_url()}/json/activate/{tab_id}", timeout=2):
+            return True
+    except Exception:
+        return False
+
+
+def activate_platform_tab(platform: str) -> bool:
+    tab = find_platform_tab(platform)
+    return bool(tab and activate_tab(str(tab.get("id") or "")))
+
+
+def open_url(url: str) -> None:
+    """Open an application URL in the same dedicated Chrome used by collection."""
+    ensure_browser([url])
+    for tab in list_tabs():
+        if str(tab.get("url", "")).rstrip("/") == url.rstrip("/"):
+            activate_tab(str(tab.get("id") or ""))
+            return
+    tab = new_tab(url)
+    if tab:
+        activate_tab(str(tab.get("id") or ""))
