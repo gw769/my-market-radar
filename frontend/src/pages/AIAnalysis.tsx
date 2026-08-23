@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { AlertCircle, ArrowRight, CheckCircle2, Gauge, Sparkles } from "lucide-react";
 import { apiGet } from "@/lib/api";
 import type { Keyword, OpportunitySegment, PlatformScore } from "@/types";
@@ -9,13 +9,19 @@ const RESULT_STATUSES = new Set(["completed", "partial"]);
 export default function AIAnalysis() {
   const [keywords, setKeywords] = useState<Keyword[]>([]);
   const [keywordId, setKeywordId] = useState(0);
+  const load = useCallback(() => apiGet<any>("/keywords").then((r) => {
+    const rows = r.data || [];
+    setKeywords(rows);
+    setKeywordId((current) => current || rows[0]?.id || 0);
+  }), []);
 
   useEffect(() => {
-    apiGet<any>("/keywords").then((r) => {
-      setKeywords(r.data || []);
-      if (r.data?.[0]) setKeywordId(r.data[0].id);
-    });
-  }, []);
+    load();
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") load();
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [load]);
 
   const item = keywords.find((x) => x.id === keywordId);
   const latestRun = item?.latest_run;
@@ -24,6 +30,8 @@ export default function AIAnalysis() {
     : item?.latest_result_run;
   const analysis = run?.analysis || {};
   const segments = (analysis.opportunity_segments || []) as OpportunitySegment[];
+  const evidence = analysis.evidence || null;
+  const collector = analysis.collector_health || null;
   const showingOlderResult = Boolean(latestRun && run && latestRun.id !== run.id);
 
   return <div className="page-stack">
@@ -31,14 +39,14 @@ export default function AIAnalysis() {
       <div>
         <span className="eyebrow">EVIDENCE-GATED HEURISTIC</span>
         <h2>分析建议</h2>
-        <p>缺少核心公开字段时不放大剩余权重；配件、多件装和低相关结果不进入评分，卖家集中度只在有稳定卖家标识时启用。</p>
+        <p>缺少核心公开字段时不放大剩余权重；配件、多件装和低相关结果不进入评分，并独立检查采集器健康度。</p>
       </div>
       <select value={keywordId} onChange={(e) => setKeywordId(Number(e.target.value))}>
         {keywords.map((x) => <option value={x.id} key={x.id}>{x.keyword}</option>)}
       </select>
     </section>
 
-    {showingOlderResult && <div className="info-box">最新任务状态：{latestRun?.status}。当前先展示最近一次可用分析结果，完成后会自动替换。</div>}
+    {showingOlderResult && <div className="info-box">最新任务状态：{latestRun?.status}。当前先展示最近一次可用分析结果；页面每 3 秒刷新，完成后会自动替换。</div>}
 
     {!run ? <div className="empty-state panel">这个关键词还没有可用的分析结果。</div> : <>
       <section className="score-banner panel">
@@ -47,20 +55,44 @@ export default function AIAnalysis() {
         <Gauge />
       </section>
 
+      {(evidence || collector) && <section className="panel">
+        <div className="panel-title"><div><span>DATA TRUST</span><h3>证据与采集健康度</h3></div><Gauge /></div>
+        {evidence && <div className="info-box">
+          <strong>Evidence {evidence.grade} · {evidence.label}</strong>
+          <div>数据完整度 {evidence.confidence}% · 采集健康度 {evidence.collector_health}% · 相关样本 {evidence.sample_total} 条</div>
+          {evidence.reasons?.length > 0 && <small>{evidence.reasons.join("；")}</small>}
+        </div>}
+        {collector && <div className="table-shell">
+          <table>
+            <thead><tr><th>平台</th><th>状态</th><th>健康度</th><th>Raw → Parsed</th><th>价格覆盖</th><th>需求字段</th><th>警告</th></tr></thead>
+            <tbody>{Object.entries(collector.platforms || {}).map(([name, value]: [string, any]) => <tr key={name}>
+              <td><strong>{name}</strong></td>
+              <td>{value.status}</td>
+              <td>{value.health_score}%</td>
+              <td>{value.raw_count} → {value.parsed_count}<small>DOM 行 {value.raw_rows ?? value.raw_count} · 唯一商品解析率 {value.parse_ratio}%</small></td>
+              <td>{value.coverage?.price ?? 0}%</td>
+              <td>销量 {value.coverage?.sold_count ?? 0}% · 评论 {value.coverage?.review_count ?? 0}%</td>
+              <td>{value.warnings?.length ? value.warnings.join("；") : "—"}</td>
+            </tr>)}</tbody>
+          </table>
+        </div>}
+      </section>}
+
       <section className="platform-analysis">
         {Object.entries(run.platform_scores || {}).map(([name, score]) => <PlatformCard key={name} name={name} score={score} />)}
       </section>
 
       {segments.length > 0 && <section className="panel">
         <div className="panel-title"><div><span>PRODUCT FAMILIES</span><h3>商品族机会排序</h3></div><Sparkles /></div>
-        <p className="method-note"><AlertCircle /> 按搜索标题里反复出现的属性做轻量拆分，用来缩小验证范围，不等同于 Shopee / Lazada 官方类目。</p>
+        <p className="method-note"><AlertCircle /> 按搜索标题里反复出现的属性做轻量拆分；小样本和单平台商品族会向中性分收缩，排序可靠度越低越不应直接下结论。</p>
         <div className="table-shell">
           <table>
-            <thead><tr><th>#</th><th>商品族</th><th>机会分</th><th>样本</th><th>平台证据</th><th>中位价</th><th>卖家集中度</th><th>代表商品</th></tr></thead>
+            <thead><tr><th>#</th><th>商品族</th><th>机会分</th><th>可靠度</th><th>样本</th><th>平台证据</th><th>中位价</th><th>卖家集中度</th><th>代表商品</th></tr></thead>
             <tbody>{segments.map((segment, index) => <tr key={`${segment.label}-${index}`}>
               <td><b>#{index + 1}</b></td>
               <td><strong>{segment.label}</strong><small>{segment.verdict} · 完整度 {segment.confidence}%</small></td>
-              <td><strong>{segment.opportunity_score}</strong></td>
+              <td><strong>{segment.opportunity_score}</strong>{segment.raw_opportunity_score != null && <small>原始 {segment.raw_opportunity_score}</small>}</td>
+              <td>{segment.ranking_reliability == null ? "—" : `${segment.ranking_reliability}%`}</td>
               <td>{segment.sample_size} 条<small>占相关结果 {segment.share}%</small></td>
               <td>{segment.platform_coverage}%</td>
               <td>{segment.median_price == null ? "—" : `RM ${segment.median_price.toFixed(2)}`}</td>
@@ -93,6 +125,7 @@ function PlatformCard({ name, score }: { name: string; score: PlatformScore }) {
   const sellerConcentration = score.metrics?.seller_concentration;
   const sellerCount = score.metrics?.seller_count;
   const sellerCoverage = score.metrics?.seller_identity_coverage;
+  const sellerReliability = score.metrics?.seller_evidence_reliability;
 
   return <article className={`panel platform-analysis-card ${name}`}>
     <div>
@@ -101,7 +134,7 @@ function PlatformCard({ name, score }: { name: string; score: PlatformScore }) {
       <small>{score.verdict} · {score.sample_size}/{raw} 条相关样本 · 完整度 {score.confidence}%</small>
       {excludedParts.length > 0 && <small>已排除：{excludedParts.join(" · ")}</small>}
       {sellerConcentration != null
-        ? <small>卖家集中度 {sellerConcentration.toFixed(1)}/100 · 可识别卖家 {sellerCount ?? "—"} 个</small>
+        ? <small>卖家集中度 {sellerConcentration.toFixed(1)}/100 · 可识别卖家 {sellerCount ?? "—"} 个 · 证据可靠度 {sellerReliability ?? 0}%</small>
         : <small>卖家集中度暂不参与：卖家标识覆盖 {sellerCoverage ?? 0}%</small>}
       {score.eligible === false && score.eligibility_reasons?.length ? <small>{score.eligibility_reasons.slice(0, 2).join("；")}</small> : null}
     </div>

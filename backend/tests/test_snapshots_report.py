@@ -1,6 +1,5 @@
 import unittest
 from io import BytesIO
-from unittest.mock import patch
 
 from openpyxl import load_workbook
 from sqlalchemy import create_engine
@@ -47,10 +46,14 @@ class SnapshotAndReportTests(unittest.TestCase):
             platform="shopee", item_id="item-1", title="Bottle", product_url="https://example.test/1",
             price=19.9, sold_count=120, search_rank=1,
         )
-        with patch.object(runner, "SessionLocal", self.Session):
-            runner._persist_platform(self.run1_id, self.keyword_id, "shopee", [listing])
-            runner._persist_platform(self.run2_id, self.keyword_id, "shopee", [])
         db = self.Session()
+        keyword = db.query(TrackedKeyword).filter_by(id=self.keyword_id).one()
+        run1 = db.query(AnalysisRun).filter_by(id=self.run1_id).one()
+        run2 = db.query(AnalysisRun).filter_by(id=self.run2_id).one()
+        runner._persist_results(db, run1, keyword, {"shopee": [listing], "lazada": []})
+        db.commit()
+        runner._persist_results(db, run2, keyword, {"shopee": [], "lazada": []})
+        db.commit()
         self.assertEqual(db.query(ListingSnapshot).filter_by(run_id=self.run1_id).count(), 1)
         self.assertEqual(db.query(ListingSnapshot).filter_by(run_id=self.run2_id).count(), 0)
         db.close()

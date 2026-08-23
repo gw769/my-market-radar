@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from app.core.database import SessionLocal
 from app.core.logging import logger
 from app.models.marketplace import TrackedKeyword
+from app.services.marketplace.recovery import recover_stale_runs
 from app.services.marketplace.runner import create_run, submit_run
 
 _stop = threading.Event()
@@ -76,8 +77,6 @@ def _run_due_jobs() -> None:
                 continue
 
             run = create_run(db, keyword, trigger="scheduled")
-            # Advance the durable schedule before touching the in-memory queue. This prevents
-            # needs_verification/running jobs from being retried every scheduler tick.
             keyword.next_run_at = next_run_utc(keyword.daily_time, keyword.timezone, now_utc)
             db.commit()
 
@@ -89,6 +88,10 @@ def _run_due_jobs() -> None:
 
 def _loop() -> None:
     while not _stop.is_set():
+        try:
+            recover_stale_runs()
+        except Exception as exc:
+            logger.error("采集 worker 心跳巡检失败: %s", exc, exc_info=True)
         try:
             _run_due_jobs()
         except Exception as exc:

@@ -39,6 +39,8 @@ SECRET_KEY=<随机私密字符串>
 BOOTSTRAP_ADMIN_EMAIL=<你的管理员邮箱>
 BOOTSTRAP_ADMIN_PASSWORD=<首次管理员密码>
 ALLOW_REGISTRATION=false
+RUN_HEARTBEAT_SECONDS=10
+RUN_STALE_AFTER_SECONDS=240
 ```
 
 然后：
@@ -63,6 +65,34 @@ Docker 镜像内置 Chromium；无桌面环境时使用 headless CDP 完成普�
 - `/api/auth/register` 默认返回 403；只有 `ALLOW_REGISTRATION=true` 才开放。
 
 因此 systemd / Docker / 直接 uvicorn 的首次部署要先准备根目录 `.env`。
+
+## Worker heartbeat 与自动恢复
+
+运行中的 `analysis_runs` 会记录普通的 `worker_id` 和 `heartbeat_at`：
+
+- worker 默认每 `RUN_HEARTBEAT_SECONDS=10` 秒续租。
+- scheduler 每 30 秒巡检 running run。
+- 超过 `RUN_STALE_AFTER_SECONDS=240` 秒没有心跳时，将该 run 恢复成 pending 并重新排队。
+- checkpoint 与最终写入都会校验 worker_id；旧 worker 后续恢复也不能覆盖新 worker 结果。
+
+这里不使用签名、加密或额外密钥，只用普通 worker 标识 + 时间戳控制租约。
+
+正常的 Chrome/CDP 调用本身都有超时，因此 stale 阈值应明显大于单次 `COLLECTION_TIMEOUT_SECONDS`。默认 `45 / 240` 不建议反过来配置。
+
+## Collector health 与 Evidence grade
+
+每次 run 会在 `analysis` JSON 中保存 collector health：raw 卡片数、parsed 数、解析率和关键字段覆盖。分析页和 Excel 都会展示。
+
+Evidence A/B/C/D 会综合：
+
+- 各平台评分是否达到 eligible 门槛
+- 数据完整度
+- collector health
+- 相关样本量
+
+Evidence D 不输出强机会结论；Evidence C 的强推荐会降级为谨慎观察。这样页面结构变化时不会把“采集器坏了”误当成“市场差”。
+
+最终双平台机会分使用平台 `confidence` 作为聚合权重；商品族排序也会按样本量、平台覆盖和 confidence 向中性分收缩，避免 4～8 条极端样本直接冲榜。
 
 ## systemd（当前服务器布局）
 
@@ -96,11 +126,15 @@ sudo systemctl restart my-market-radar.service
 
 ## 更新已有部署
 
-这轮更新不需要新增数据库列。更新代码后：
+这轮会为 `analysis_runs` 自动补两个 nullable 列：`worker_id`、`heartbeat_at`。现有 `_sync_schema()` 可以完成这种 additive 列升级，不需要引入额外迁移框架。
 
-1. 安装最新 Python 依赖（Windows 需要新增 `tzdata`）。
-2. 前端重新 `npm ci && npm run build`，或用 Docker 自动构建。
-3. 检查 `.env` 的默认分析值是否符合预期：`DEFAULT_RESULTS_LIMIT`、`DEFAULT_DAILY_TIME`、`DEFAULT_TIMEZONE`、`COLLECTION_TIMEOUT_SECONDS`。
-4. 重启服务。
+更新代码后：
+
+1. 备份数据库。
+2. 安装最新 Python 依赖（Windows 需要 `tzdata`）。
+3. 前端重新 `npm ci && npm run build`，或用 Docker 自动构建。
+4. 检查 `.env`：`DEFAULT_RESULTS_LIMIT`、`DEFAULT_DAILY_TIME`、`DEFAULT_TIMEZONE`、`COLLECTION_TIMEOUT_SECONDS`、`RUN_HEARTBEAT_SECONDS`、`RUN_STALE_AFTER_SECONDS`。
+5. 重启服务；启动日志应看到 schema sync 自动补列或确认列已存在。
+6. 跑一个双平台关键词，确认分析页出现 Evidence 等级和 Collector Health 表。
 
 新任务会冻结创建时的平台/样本数配置；修改跟踪设置不会改变已经运行中的任务。failed/partial 重试会创建新 run，旧历史不会再被覆盖。

@@ -28,7 +28,7 @@ def _valid_timezone(value: str) -> str:
 
 class Settings(BaseSettings):
     APP_NAME: str = "MY Marketplace Analyzer"
-    APP_VERSION: str = "1.0.2"
+    APP_VERSION: str = "1.0.3"
     DEBUG: bool = False
     SECRET_KEY: str = "dev-secret-key-change-in-production"
     ALLOW_REGISTRATION: bool = False
@@ -52,6 +52,8 @@ class Settings(BaseSettings):
     BROWSER_START_TIMEOUT_SECONDS: float = Field(default=8.0, ge=1.0, le=60.0)
     BROWSER_HEADLESS_FALLBACK: bool = True
     COLLECTION_TIMEOUT_SECONDS: int = Field(default=45, ge=5, le=120)
+    RUN_HEARTBEAT_SECONDS: int = Field(default=10, ge=3, le=60)
+    RUN_STALE_AFTER_SECONDS: int = Field(default=240, ge=60, le=1800)
     DEFAULT_RESULTS_LIMIT: int = Field(default=20, ge=10, le=40)
     DEFAULT_DAILY_TIME: str = "20:00"
     DEFAULT_TIMEZONE: str = "Asia/Kuala_Lumpur"

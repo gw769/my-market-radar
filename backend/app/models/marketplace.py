@@ -58,6 +58,8 @@ class AnalysisRun(Base):
     platform_scores = Column(JSON, nullable=True)
     analysis = Column(JSON, nullable=True)
     error_message = Column(Text, nullable=True)
+    worker_id = Column(String(120), nullable=True, index=True)
+    heartbeat_at = Column(DateTime, nullable=True, index=True)
     started_at = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
