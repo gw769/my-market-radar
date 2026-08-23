@@ -1,14 +1,15 @@
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
+
 from app.core.database import get_db
+from app.core.logging import logger
 from app.core.security import (
-    verify_password,
-    get_password_hash,
     create_access_token,
     get_current_user,
+    get_password_hash,
+    verify_password,
 )
-from app.core.logging import logger
 from app.models.user import User
 from app.schemas.user import UserCreate, UserLogin, UserResponse
 
@@ -52,7 +53,7 @@ def login(login_data: UserLogin, db: Session = Depends(get_db)):
 
     user = db.query(User).filter(User.email == login_data.email).first()
 
-    if not user or not verify_password(login_data.password, user.password_hash):
+    if not user or not user.is_active or not verify_password(login_data.password, user.password_hash):
         return JSONResponse(status_code=401, content={"success": False, "message": "邮箱或密码错误"})
 
     access_token = create_access_token(data={"sub": user.id})
