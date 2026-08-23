@@ -76,6 +76,31 @@ RUN_STALE_AFTER_SECONDS=240
 
 Windows 环境会通过 Python 依赖 `tzdata` 获得 IANA 时区数据库，因此 `Asia/Kuala_Lumpur` 不依赖操作系统自带时区文件。
 
+## 机会发现 MVP
+
+侧边栏“机会发现”提供一个不先输入具体商品的快速入口。当前版本使用固定、可审计的类目 preset，不依赖 LLM、向量库或外部趋势 API：
+
+- 家居收纳：`storage box / shoe rack / laundry basket / drawer organizer`
+- 厨房饮水：`water bottle / lunch box / food container / portable blender`
+- 宠物用品：`pet water fountain / pet feeder / cat scratcher / pet grooming brush`
+- 办公桌面：`laptop stand / desk lamp / cable organizer / mouse pad`
+- 运动出行：`yoga mat / resistance band / gym bag / travel organizer`
+
+每次选择一个方向后，页面会把 4 个候选送进现有采集队列，复用同一套 Shopee/Lazada adapter、collector health、Evidence、平台评分和 calibration，不维护第二套评分逻辑。
+
+发现扫描为了第一轮筛选，新增候选默认使用 `10~15` 条/平台的小样本，并且 `tracking_enabled=false`，避免机会池自动污染每日跟踪。已存在的关键词只触发一次新 run，不会修改它原本的跟踪配置和样本设置。
+
+候选榜按 Evidence 等级优先，再看校准机会分，并显示：
+
+- 当前任务状态
+- Evidence A/B/C/D
+- 校准机会分与完整度
+- 双平台中位价参考
+- 排名最高的商品族
+- 商品族 `ranking_reliability`
+
+这只是“自动候选池”的第一版，不等同于平台实时热销榜或外部趋势数据库。排名靠前的候选应再进入“关键词分析”做完整样本验证。
+
 ## 数据口径
 
 - 只使用页面公开可见信息，不登录平台账号，不调用卖家后台数据。
