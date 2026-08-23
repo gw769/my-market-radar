@@ -63,7 +63,9 @@ def parse_money_range(value: Any) -> tuple[float, float] | None:
         return None
     text = str(value).replace(",", "")
     match = re.search(
-        r"RM\s*([0-9]+(?:\.[0-9]{1,2})?)\s*(?:-|–|—|~|to)\s*(?:RM\s*)?([0-9]+(?:\.[0-9]{1,2})?)",
+        r"RM[^\S\r\n]*([0-9]+(?:\.[0-9]{1,2})?)[^\S\r\n]*"
+        r"(?:-|–|—|~|to)[^\S\r\n]*(?:RM[^\S\r\n]*)?"
+        r"([0-9]+(?:\.[0-9]{1,2})?)(?![0-9.]|[^\S\r\n]*%)",
         text,
         re.I,
     )

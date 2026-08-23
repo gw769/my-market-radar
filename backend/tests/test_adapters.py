@@ -44,6 +44,8 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(parse_money_range("RM 10.00 - RM 25.50"), (10.0, 25.5))
         self.assertEqual(parse_money_range("RM 25 ~ 10"), (10.0, 25.0))
         self.assertIsNone(parse_money_range("RM 20.00\nRM 30.00"))
+        self.assertIsNone(parse_money_range("RM\n2.64\nRM\n8.80\n-70%"))
+        self.assertIsNone(parse_money_range("RM 2.64 RM 8.80 -70%"))
         self.assertIsNone(parse_compact_count(None))
 
     def test_missing_currency_does_not_turn_title_number_into_price(self):
@@ -134,6 +136,19 @@ class AdapterTests(unittest.TestCase):
             "sold": "300 sold",
         }, 1)
         self.assertIsNone(lazada.price)
+
+    def test_shopee_original_price_and_discount_are_not_a_variant_range(self):
+        row = ShopeeMalaysiaAdapter().parse_card({
+            "href": "https://shopee.com.my/Nail-Sticker-i.1001.9202",
+            "title": "3D Relief Fruit Nail Stickers",
+            "text": "3D Relief Fruit Nail Stickers\nRM\n2.64\nRM\n8.80\n-70%\n4.9\n已售出6千+件",
+            "price": "RM\n2.64",
+            "sold": "已售出6千+件",
+            "rating": "4.9",
+        }, 1)
+
+        self.assertIsNotNone(row)
+        self.assertEqual(row.price, 2.64)
 
     def test_lazada_json_parse_discount_and_page_variant(self):
         cards = json.loads((FIXTURES / "lazada_cards.json").read_text())
