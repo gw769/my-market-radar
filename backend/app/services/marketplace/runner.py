@@ -19,6 +19,7 @@ from app.core.database import SessionLocal
 from app.core.logging import logger
 from app.models.marketplace import AnalysisRun, ListingSnapshot, TrackedKeyword
 from app.services.marketplace.adapters import ADAPTERS, MarketplaceListing, VerificationRequired
+from app.services.marketplace.analysis_guard import finalize_analysis_evidence
 from app.services.marketplace.browser import (
     activate_platform_tab,
     browser_ready,
@@ -205,9 +206,6 @@ async def _collect_resident_tab(adapter: Any, keyword: str, limit: int) -> tuple
             value = _runtime_value(cards, [])
             raw_cards = value if isinstance(value, list) else []
 
-            # A marketplace card can expose multiple anchors (image/title/etc.). Counting raw
-            # anchors caused the collector to stop early with far fewer unique products than
-            # requested. Use the adapter's real deduplicated/validated result count instead.
             usable_count = len(adapter.parse_cards(raw_cards, limit))
             if usable_count >= limit:
                 break
@@ -349,7 +347,7 @@ def execute_run_sync(run_id: int) -> None:
         run.progress = 75
         run.current_step = "计算公开数据机会分"
         by_platform = {platform: [listing.to_dict() for listing in listings] for platform, listings in collected.items()}
-        analysis = build_analysis(keyword.keyword, by_platform)
+        analysis = finalize_analysis_evidence(build_analysis(keyword.keyword, by_platform))
         counts = {platform: len(items) for platform, items in collected.items()}
         expected = set(keyword.platforms or [])
         successful = {platform for platform, items in collected.items() if items}
