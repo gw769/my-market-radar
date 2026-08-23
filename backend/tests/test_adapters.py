@@ -9,7 +9,6 @@ from app.services.marketplace.adapters import (
     parse_money,
 )
 
-
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
@@ -19,6 +18,10 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(parse_compact_count("1.2k sold"), 1200)
         self.assertEqual(parse_compact_count("2m terjual"), 2_000_000)
         self.assertIsNone(parse_compact_count(None))
+
+    def test_missing_currency_does_not_turn_title_number_into_price(self):
+        self.assertIsNone(parse_money("1L bottle 4.9 stars", require_currency=True))
+        self.assertIsNone(parse_money("1L bottle 4.9 stars"))
 
     def test_shopee_json_parse_deduplicates_and_preserves_missing(self):
         cards = json.loads((FIXTURES / "shopee_cards.json").read_text())
