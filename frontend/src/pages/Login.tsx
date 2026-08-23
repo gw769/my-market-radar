@@ -4,8 +4,8 @@ import { ArrowRight, Radar, ShieldCheck } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 
 export default function Login() {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
+  const [email, setEmail] = useState("admin@market.my");
+  const [password, setPassword] = useState("admin123");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const { login } = useAuth();
@@ -33,7 +33,7 @@ export default function Login() {
       <label>密码<input value={password} onChange={(e) => setPassword(e.target.value)} type="password" autoComplete="current-password" required /></label>
       {error && <div className="error-box">{error}</div>}
       <button className="primary-button" disabled={busy}>{busy ? "正在登录…" : "进入市场雷达"}<ArrowRight size={17} /></button>
-      <small>首次部署请在 .env 设置 BOOTSTRAP_ADMIN_PASSWORD；已有账户不会重复创建。</small>
+      <small>已填入默认账号，可直接登录；如已修改密码，请覆盖后再进入。</small>
     </form></section>
   </div>;
 }
