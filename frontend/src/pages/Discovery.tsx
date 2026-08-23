@@ -18,36 +18,11 @@ interface DiscoveryPreset {
 }
 
 const PRESETS: DiscoveryPreset[] = [
-  {
-    id: "home",
-    name: "家居收纳",
-    description: "收纳、空间利用、日常整理类商品",
-    seeds: ["storage box", "shoe rack", "laundry basket", "drawer organizer"],
-  },
-  {
-    id: "kitchen",
-    name: "厨房饮水",
-    description: "厨房、便携饮水、食物收纳和小家电",
-    seeds: ["water bottle", "lunch box", "food container", "portable blender"],
-  },
-  {
-    id: "pet",
-    name: "宠物用品",
-    description: "猫狗日常喂养、清洁和活动用品",
-    seeds: ["pet water fountain", "pet feeder", "cat scratcher", "pet grooming brush"],
-  },
-  {
-    id: "office",
-    name: "办公桌面",
-    description: "桌面整理、支架、照明和常用数码周边",
-    seeds: ["laptop stand", "desk lamp", "cable organizer", "mouse pad"],
-  },
-  {
-    id: "sports",
-    name: "运动出行",
-    description: "健身、旅行、户外和随身收纳方向",
-    seeds: ["yoga mat", "resistance band", "gym bag", "travel organizer"],
-  },
+  { id: "home", name: "家居收纳", description: "收纳、空间利用、日常整理类商品", seeds: ["storage box", "shoe rack", "laundry basket", "drawer organizer"] },
+  { id: "kitchen", name: "厨房饮水", description: "厨房、便携饮水、食物收纳和小家电", seeds: ["water bottle", "lunch box", "food container", "portable blender"] },
+  { id: "pet", name: "宠物用品", description: "猫狗日常喂养、清洁和活动用品", seeds: ["pet water fountain", "pet feeder", "cat scratcher", "pet grooming brush"] },
+  { id: "office", name: "办公桌面", description: "桌面整理、支架、照明和常用数码周边", seeds: ["laptop stand", "desk lamp", "cable organizer", "mouse pad"] },
+  { id: "sports", name: "运动出行", description: "健身、旅行、户外和随身收纳方向", seeds: ["yoga mat", "resistance band", "gym bag", "travel organizer"] },
 ];
 
 const RESULT_STATUSES = new Set(["completed", "partial"]);
@@ -93,26 +68,23 @@ export default function Discovery() {
   const preset = PRESETS.find((item) => item.id === selectedId) || PRESETS[0];
   const quickLimit = Math.max(10, Math.min(defaults.results_limit || 20, 15));
 
-  const rows = useMemo(() => {
-    return preset.seeds.map((seed) => {
-      const keyword = keywords.find((item) => item.keyword.trim().toLowerCase() === seed.toLowerCase());
-      const run = resultRun(keyword);
-      const latest = keyword?.latest_run || null;
-      const evidence = run?.analysis?.evidence || null;
-      const topSegment = run?.analysis?.opportunity_segments?.[0] || null;
-      const platformScores = Object.values(run?.platform_scores || {});
-      const prices = platformScores
-        .map((score: any) => score?.metrics?.median_price)
-        .filter((value: any) => typeof value === "number") as number[];
-      const medianPrice = prices.length ? prices.reduce((sum, value) => sum + value, 0) / prices.length : null;
-      return { seed, keyword, latest, run, evidence, topSegment, medianPrice };
-    }).sort((a, b) => {
-      const aGrade = GRADE_RANK[a.evidence?.grade] || 0;
-      const bGrade = GRADE_RANK[b.evidence?.grade] || 0;
-      if (aGrade !== bGrade) return bGrade - aGrade;
-      return (b.run?.opportunity_score ?? -1) - (a.run?.opportunity_score ?? -1);
-    });
-  }, [keywords, preset]);
+  const rows = useMemo(() => preset.seeds.map((seed) => {
+    const keyword = keywords.find((item) => item.keyword.trim().toLowerCase() === seed.toLowerCase());
+    const run = resultRun(keyword);
+    const latest = keyword?.latest_run || null;
+    const evidence = run?.analysis?.evidence || null;
+    const topSegment = run?.analysis?.opportunity_segments?.[0] || null;
+    const prices = Object.values(run?.platform_scores || {})
+      .map((score: any) => score?.metrics?.median_price)
+      .filter((value: any) => typeof value === "number") as number[];
+    const medianPrice = prices.length ? prices.reduce((sum, value) => sum + value, 0) / prices.length : null;
+    return { seed, keyword, latest, run, evidence, topSegment, medianPrice };
+  }).sort((a, b) => {
+    const aGrade = GRADE_RANK[a.evidence?.grade] || 0;
+    const bGrade = GRADE_RANK[b.evidence?.grade] || 0;
+    if (aGrade !== bGrade) return bGrade - aGrade;
+    return (b.run?.opportunity_score ?? -1) - (a.run?.opportunity_score ?? -1);
+  }), [keywords, preset]);
 
   const activeCount = rows.filter((row) => row.latest && ACTIVE_STATUSES.has(row.latest.status)).length;
   const readyCount = rows.filter((row) => row.run).length;
@@ -121,10 +93,12 @@ export default function Discovery() {
     setBusy(true);
     setError("");
     setMessage("");
-    try {
-      let submitted = 0;
-      let reused = 0;
-      for (const seed of preset.seeds) {
+    let submitted = 0;
+    let reused = 0;
+    const failed: string[] = [];
+
+    for (const seed of preset.seeds) {
+      try {
         const existing = keywords.find((item) => item.keyword.trim().toLowerCase() === seed.toLowerCase());
         if (existing) {
           const latest = existing.latest_run;
@@ -132,11 +106,15 @@ export default function Discovery() {
             reused += 1;
             continue;
           }
-          await apiPost(`/keywords/${existing.id}/runs`);
+          const response = await apiPost<any>(`/keywords/${existing.id}/runs`);
+          if (response?.queued === false && !ACTIVE_STATUSES.has(response?.run?.status)) {
+            throw new Error("任务未进入队列");
+          }
           submitted += 1;
           continue;
         }
-        await apiPost("/keywords", {
+
+        const response = await apiPost<any>("/keywords", {
           keyword: seed,
           platforms: defaults.platforms?.length ? defaults.platforms : ["shopee", "lazada"],
           results_limit: quickLimit,
@@ -144,15 +122,22 @@ export default function Discovery() {
           daily_time: defaults.daily_time,
           timezone: defaults.timezone,
         });
+        if (response?.queued === false && !ACTIVE_STATUSES.has(response?.run?.status)) {
+          throw new Error("任务未进入队列");
+        }
         submitted += 1;
+      } catch (err) {
+        failed.push(seed);
       }
-      setMessage(`已提交 ${submitted} 个候选扫描${reused ? `，另有 ${reused} 个正在队列中` : ""}。结果会自动刷新。`);
-      await load();
-    } catch (err: any) {
-      setError(err.message || "启动机会发现失败");
-    } finally {
-      setBusy(false);
     }
+
+    const parts = [`已提交 ${submitted} 个候选扫描`];
+    if (reused) parts.push(`${reused} 个已在队列中`);
+    if (failed.length) parts.push(`${failed.length} 个提交失败`);
+    setMessage(`${parts.join("，")}。结果会自动刷新。`);
+    setError(failed.length ? `未提交成功：${failed.join("、")}。其他候选已继续处理，可稍后再次补提交。` : "");
+    try { await load(); } catch { /* polling will retry */ }
+    setBusy(false);
   };
 
   return <div className="page-stack">
@@ -168,12 +153,9 @@ export default function Discovery() {
     <section className="panel">
       <div className="panel-title"><div><span>DISCOVERY PRESETS</span><h3>选择市场方向</h3></div><Sparkles /></div>
       <div className="platform-grid">
-        {PRESETS.map((item) => <button
-          type="button"
-          key={item.id}
-          onClick={() => setSelectedId(item.id)}
-          className={`platform-card ${selectedId === item.id ? "selected" : ""}`}
-        ><Compass /><div><strong>{item.name}</strong><span>{item.description}</span></div><i /></button>)}
+        {PRESETS.map((item) => <button type="button" key={item.id} onClick={() => setSelectedId(item.id)} className={`platform-card ${selectedId === item.id ? "selected" : ""}`}>
+          <Compass /><div><strong>{item.name}</strong><span>{item.description}</span></div><i />
+        </button>)}
       </div>
       <div className="notice-row"><RefreshCw size={17} /><span>当前：{readyCount}/{preset.seeds.length} 个候选已有稳定结果，{activeCount} 个任务正在排队/采集/验证。</span></div>
       {message && <div className="info-box">{message}</div>}
