@@ -1,7 +1,8 @@
 import unittest
+from datetime import datetime, timedelta
 from unittest.mock import Mock, patch
 
-from app.services.marketplace.recovery import recover_interrupted_runs
+from app.services.marketplace.recovery import recover_interrupted_runs, recover_stale_runs
 
 
 class FakeRun:
@@ -10,8 +11,10 @@ class FakeRun:
         self.status = status
         self.progress = 64
         self.current_step = "采集中"
-        self.started_at = object()
-        self.completed_at = object()
+        self.started_at = datetime(2026, 8, 23, 4, 0, 0)
+        self.heartbeat_at = datetime(2026, 8, 23, 4, 1, 0)
+        self.worker_id = "worker-old"
+        self.completed_at = datetime(2026, 8, 23, 4, 2, 0)
         self.error_message = "old error"
         self.verification_platform = "shopee"
 
@@ -69,7 +72,33 @@ class RecoveryTests(unittest.TestCase):
             self.assertIsNone(run.completed_at)
             self.assertIsNone(run.error_message)
             self.assertIsNone(run.verification_platform)
+            self.assertIsNone(run.worker_id)
+            self.assertIsNone(run.heartbeat_at)
         self.assertEqual([call.args[0] for call in submit.call_args_list], [10, 11])
+
+    def test_stale_running_worker_is_recovered_but_recent_worker_is_left_alone(self):
+        stale = FakeRun(21, "running")
+        recent = FakeRun(22, "running")
+        now = datetime(2026, 8, 23, 5, 0, 0)
+        stale.heartbeat_at = now - timedelta(minutes=10)
+        recent.heartbeat_at = now - timedelta(seconds=30)
+        session = FakeSession([stale, recent])
+        submit = Mock(return_value=True)
+
+        with patch("app.services.marketplace.recovery.SessionLocal", return_value=session), patch(
+            "app.services.marketplace.recovery.submit_run", submit
+        ), patch("app.services.marketplace.recovery.settings.RUN_STALE_AFTER_SECONDS", 240):
+            queued = recover_stale_runs(now=now)
+
+        self.assertEqual(queued, 1)
+        self.assertTrue(session.committed)
+        self.assertEqual(stale.status, "pending")
+        self.assertEqual(stale.current_step, "采集 worker 心跳超时，等待自动恢复")
+        self.assertIsNone(stale.worker_id)
+        self.assertIsNone(stale.heartbeat_at)
+        self.assertEqual(recent.status, "running")
+        self.assertEqual(recent.worker_id, "worker-old")
+        submit.assert_called_once_with(21)
 
     def test_empty_recovery_does_not_commit_or_submit(self):
         session = FakeSession([])
