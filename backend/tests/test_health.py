@@ -27,12 +27,29 @@ class CollectorHealthTests(unittest.TestCase):
 
     def test_good_collection_is_healthy(self):
         rows = [listing(shop_id=f"shop-{index}") for index in range(20)]
-        health = assess_collection_health([{} for _ in range(20)], rows, 20)
+        raw = [{"item_id": f"item-{index}"} for index in range(20)]
+        health = assess_collection_health(raw, rows, 20)
         self.assertEqual(health["status"], "healthy")
         self.assertGreaterEqual(health["health_score"], 90)
 
+    def test_duplicate_raw_anchors_count_as_one_product(self):
+        rows = [listing(shop_id=f"shop-{index}") for index in range(10)]
+        raw = []
+        for index in range(10):
+            href = f"https://example.test/item-{index}?src=search"
+            raw.extend([
+                {"item_id": f"item-{index}", "href": href, "title": f"Bottle {index}"},
+                {"item_id": f"item-{index}", "href": href, "title": f"Bottle {index}"},
+            ])
+        health = assess_collection_health(raw, rows, 10)
+        self.assertEqual(health["raw_rows"], 20)
+        self.assertEqual(health["raw_count"], 10)
+        self.assertEqual(health["parse_ratio"], 100.0)
+        self.assertEqual(health["status"], "healthy")
+
     def test_error_platform_makes_overall_health_unhealthy(self):
-        good = assess_collection_health([{} for _ in range(20)], [listing() for _ in range(20)], 20)
+        good_raw = [{"item_id": f"item-{index}"} for index in range(20)]
+        good = assess_collection_health(good_raw, [listing() for _ in range(20)], 20)
         bad = assess_collection_health([], [], 20)
         bad["status"] = "error"
         bad["health_score"] = 0
