@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Download, FileSpreadsheet } from "lucide-react";
 import { apiGet, downloadAuthorized } from "@/lib/api";
 import type { Keyword, Run } from "@/types";
@@ -6,7 +6,15 @@ import type { Keyword, Run } from "@/types";
 export default function Reports() {
   const [keywords, setKeywords] = useState<Keyword[]>([]);
   const [message, setMessage] = useState("");
-  useEffect(() => { apiGet<any>("/keywords").then((r) => setKeywords(r.data || [])); }, []);
+  const load = useCallback(() => apiGet<any>("/keywords").then((r) => setKeywords(r.data || [])), []);
+
+  useEffect(() => {
+    load().catch(() => {});
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") load().catch(() => {});
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [load]);
 
   const ready = keywords
     .map((item) => ({ item, run: item.latest_result_run || null }))
@@ -22,7 +30,7 @@ export default function Reports() {
   };
 
   return <div className="page-stack">
-    <section className="section-heading"><div><span className="eyebrow">PORTABLE WORKBOOKS</span><h2>Excel 报告</h2><p>始终保留最近一次可用结果；新任务正在运行或失败时不会把上一份报告隐藏掉。</p></div></section>
+    <section className="section-heading"><div><span className="eyebrow">PORTABLE WORKBOOKS</span><h2>Excel 报告</h2><p>始终保留最近一次可用结果；新任务正在运行或失败时不会把上一份报告隐藏掉，新稳定结果完成后会自动刷新。</p></div></section>
     {message && <div className="info-box">{message}</div>}
     <div className="report-grid">
       {ready.map(({ item, run }) => <article className="report-card panel" key={item.id}>
