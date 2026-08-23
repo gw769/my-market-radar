@@ -1,19 +1,142 @@
 # MY Market Radar
 
-面向马来西亚市场的 Shopee 与 Lazada 公开搜索结果竞品分析器。
+面向马来西亚市场的 Shopee × Lazada 公开搜索结果分析工具。
 
-输入一个商品关键词，系统会按顺序采集所选平台的公开结果，保存价格、公开已售数、评分、评论、地区、排名、广告标记、图片和链接，并给出带数据门槛的机会评分与 Excel 报告。
+当前版本已经从最初的“输入关键词后看搜索结果”升级成一套完整的本地市场验证流程：
+
+- 关键词分析
+- 机会发现候选池
+- 一键深度扫描
+- Shopee / Lazada 公开竞品采集
+- 相关性、配件、多件装与价格异常过滤
+- 机会评分与商品族排序
+- Collector Health
+- Evidence A/B/C/D
+- 卖家集中度
+- Temporal Evidence（跨快照近期动量）
+- 每日跟踪
+- 验证码人工恢复
+- Excel 报告
+- Windows / Docker 本地部署
+
+它不是利润预测软件，也不是平台官方热销榜。它的目标是：**把公开可见的市场证据整理成一套可解释、可复查的选品判断。**
+
+---
+
+## 当前推荐使用流程
+
+### 1. 先用“机会发现”快速筛候选
+
+侧边栏进入 **机会发现**，选择一个市场方向：
+
+- 家居收纳
+- 厨房饮水
+- 宠物用品
+- 办公桌面
+- 运动出行
+
+当前 Discovery MVP 使用固定、可审计的 seed，不依赖 LLM、embedding、向量库或外部趋势 API。
+
+每组默认 4 个候选，新候选使用约 `10~15` 条/平台做第一轮快速扫描，并且：
+
+```text
+tracking_enabled = false
+```
+
+不会自动污染每日跟踪任务。
+
+### 2. 对高质量候选点“一键深扫”
+
+已有稳定结果后，可以直接在机会榜点击：
+
+```text
+深扫 20 / 40
+```
+
+深扫只修改**这一次 AnalysisRun 的冻结 request_config**，不会修改关键词的长期配置：
+
+- 不修改长期 `results_limit`
+- 不修改长期平台选择
+- 不自动打开每日跟踪
+- 不修改 daily time / timezone
+
+API：
+
+```text
+POST /api/discovery/keywords/{keyword_id}/deep-scan
+```
+
+### 3. 看 Evidence，而不是只看机会分
+
+分析页同时展示：
+
+- 总机会分
+- Shopee / Lazada 平台分
+- 数据完整度
+- Collector Health
+- Evidence A/B/C/D
+- 商品族排序
+- `ranking_reliability`
+- 卖家集中度
+- 采集异常警告
+
+推荐优先关注 **Evidence A/B**；Evidence C 只能当辅助信号，Evidence D 不输出强选品结论。
+
+### 4. 第二次稳定扫描后看 Temporal Evidence
+
+同一关键词有至少两次 completed / partial 稳定快照后，分析页会显示近期动量：
+
+- 同商品匹配数
+- 快照间隔
+- 最近有增长商品占比
+- Sold / 日
+- Review / 日
+- 价格波动
+- 排名变化
+- Temporal reliability
+
+Temporal Evidence 当前是**辅助证据**，暂时不会直接改写主机会分。
+
+这样可以减少“老链接累计 sold 很高，所以看起来需求很强”的误判。
+
+### 5. 最后再看供应链和利润
+
+机会分只回答：
+
+> 当前公开搜索结果是否显示出值得进一步验证的市场空间？
+
+真正采购前仍然需要人工核算：
+
+- 采购成本
+- 国际/本地物流
+- 平台佣金
+- 广告成本
+- 退货损耗
+- 仓储
+- 税费
+- 售后
+- 实际毛利
+
+---
 
 ## 本地启动
 
-要求：Python 3.11+、Node.js 18+、Google Chrome 或 Chromium。
+要求：
+
+- Python 3.11+
+- Node.js 18+
+- Google Chrome 或 Chromium
 
 ```bash
 cd backend
 python -m venv venv
-# Linux/macOS
+
+# Linux / macOS
 source venv/bin/activate
-# Windows PowerShell: .\venv\Scripts\Activate.ps1
+
+# Windows PowerShell
+.\venv\Scripts\Activate.ps1
+
 pip install -r requirements.txt
 
 cd ../frontend
@@ -24,44 +147,161 @@ cd ..
 python start.py
 ```
 
-`start.py` 只监听 `127.0.0.1:8011`，并显式打开项目自己的 Chrome/Chromium。浏览器使用独立持久化目录 `backend/data/browser-profile`，采集器通过 Chrome DevTools Protocol 读取公开页面，默认 CDP 端口为 `9231`。
+访问：
 
-如果项目根目录**没有 `.env`**、数据库又是全新的，`start.py` 为本机首次体验临时提供 `admin@market.my / admin123`。这个便利只存在于本机启动器路径；Docker、systemd、直接运行 uvicorn 或有 `.env` 的环境不会自动创建已知默认密码账号。
+```text
+http://localhost:8011
+```
+
+`start.py`：
+
+- 只监听 `127.0.0.1:8011`
+- 显式使用项目专用 Chrome / Chromium
+- 不调用系统默认浏览器作为主流程
+- 使用独立浏览器 profile：
+
+```text
+backend/data/browser-profile
+```
+
+- 默认 Chrome DevTools Protocol 端口：
+
+```text
+9231
+```
+
+如果根目录**没有 `.env`**、数据库又是空的，本机 `start.py` 为首次体验临时提供：
+
+```text
+admin@market.my / admin123
+```
+
+这个便利只存在于本机 launcher。Docker、systemd、直接 uvicorn 或已有 `.env` 的环境不会自动创建这个已知密码账户。
+
+---
+
+## Windows 启停
+
+本机模式：
+
+```text
+start_local.bat
+stop.bat
+```
+
+`start_local.bat` 会按顺序寻找：
+
+```text
+backend/.venv
+backend/venv
+系统 Python
+```
+
+`stop.bat` 不再按端口无条件杀进程：
+
+- 只停止明确属于 MY Market Radar 的本机 backend
+- 不自动杀占用 `3000` 的其他前端项目
+- 不能确认属于本项目的 `8011` listener 只提示，不强杀
+- `9231` 作为项目专用 Chrome CDP 端口处理
+- 不会用通配符误杀普通 Chrome 窗口
+
+Docker 模式请使用：
+
+```text
+start_docker.bat
+stop_docker.bat
+```
+
+不要用 `stop.bat` 去停止 Docker Desktop。
+
+详细说明：
+
+```text
+docs/WINDOWS_LAUNCHERS.md
+```
+
+---
 
 ## Docker
 
-先复制配置：
+复制配置：
 
 ```bash
 cp .env.docker.simple .env
 ```
 
-然后至少填写：
+至少填写：
 
-- `SECRET_KEY`：替换模板值
-- `BOOTSTRAP_ADMIN_PASSWORD`：首次空数据库管理员密码
-- 可按需修改 `BOOTSTRAP_ADMIN_EMAIL`
+```env
+SECRET_KEY=<至少32字符的私密随机字符串>
+BOOTSTRAP_ADMIN_PASSWORD=<首次管理员密码>
+BOOTSTRAP_ADMIN_EMAIL=<管理员邮箱>
+```
 
-再启动：
+然后：
 
 ```bash
 docker compose -f docker-compose.simple.yml up -d --build
 ```
 
-Windows 也可以双击 `start_docker.bat`；启动器会在构建前检查上述安全配置。Compose 默认只映射 `127.0.0.1:8011:8000`，并给 Chromium 分配更大的 `/dev/shm`，减少搜索页随机崩溃。
+Compose 默认：
 
-Dockerfile 使用 Node 多阶段构建前端，并在运行镜像中安装 Chromium。无桌面环境下普通采集使用 headless Chromium；若平台触发验证码/风控，仍需切换到有桌面的本机完成人工验证。
+```text
+127.0.0.1:8011:8000
+```
 
-## 账号与注册
+不会直接暴露到局域网或公网。
 
-- 空数据库只有在显式设置 `BOOTSTRAP_ADMIN_PASSWORD` 时才会自动创建管理员。
-- 数据库已经存在任何用户时，启动过程不会偷偷补一个默认管理员。
-- `/api/auth/register` 默认关闭；只有设置 `ALLOW_REGISTRATION=true` 才开放自助注册。
-- 登录页不包含预填密码。
+Docker 镜像内置 Chromium。无桌面环境可以完成普通 headless 采集；遇到验证码 / 风控页时，仍然需要切换到有桌面的本机人工处理。
 
-## 运行时默认值
+---
 
-下面这些 `.env` 配置会同时驱动后端 API 默认值和 Analyze 页面，不再被前端硬编码覆盖：
+## 账号与安全默认值
+
+- 空数据库只有显式设置 `BOOTSTRAP_ADMIN_PASSWORD` 才会创建管理员
+- 已有任何用户后不会偷偷补默认管理员
+- `/api/auth/register` 默认关闭
+- 只有 `ALLOW_REGISTRATION=true` 才开放自助注册
+- 登录页不预填密码
+- MySQL 明确配置但连接失败时默认 fail-fast，不静默切到一个空 SQLite
+- JWT `SECRET_KEY` 会检查最低长度和已知不安全模板值
+
+Excel 报告也做了公式注入保护：
+
+- 用户关键词
+- 商品标题
+- 店铺
+- 地区
+- 建议文字
+- marketplace 公开文本
+
+如果字符串以：
+
+```text
+=  +  -  @
+```
+
+等 Excel 公式触发字符开头，会按普通文本写入，而不是公式。
+
+详细说明：
+
+```text
+docs/REPORT_SECURITY.md
+```
+
+FastAPI 的 SPA fallback 也对静态文件路径做 containment 校验，`../`、绝对路径以及指向 `frontend/dist` 外部的 symlink 不会被当成静态文件返回。
+
+详细说明：
+
+```text
+docs/STATIC_SERVING.md
+```
+
+---
+
+## 运行时配置
+
+常用 `.env`：
 
 ```env
 DEFAULT_RESULTS_LIMIT=20
@@ -72,127 +312,476 @@ RUN_HEARTBEAT_SECONDS=10
 RUN_STALE_AFTER_SECONDS=240
 ```
 
-`RUN_HEARTBEAT_SECONDS` 是运行中采集任务续租间隔；`RUN_STALE_AFTER_SECONDS` 是多久没有心跳后由 watchdog 判定 worker 已失效并恢复任务。恢复使用普通 `worker_id + heartbeat_at`，不引入签名或额外密码学机制。
+Windows 通过 Python `tzdata` 获得 IANA 时区数据，因此 `Asia/Kuala_Lumpur` 不依赖 Windows 自带时区文件。
 
-Windows 环境会通过 Python 依赖 `tzdata` 获得 IANA 时区数据库，因此 `Asia/Kuala_Lumpur` 不依赖操作系统自带时区文件。
+---
 
-## 机会发现 MVP
+## 数据采集与 Chrome
 
-侧边栏“机会发现”提供一个不先输入具体商品的快速入口。当前版本使用固定、可审计的类目 preset，不依赖 LLM、向量库或外部趋势 API：
+项目通过 Chrome DevTools Protocol 读取公开页面。
 
-- 家居收纳：`storage box / shoe rack / laundry basket / drawer organizer`
-- 厨房饮水：`water bottle / lunch box / food container / portable blender`
-- 宠物用品：`pet water fountain / pet feeder / cat scratcher / pet grooming brush`
-- 办公桌面：`laptop stand / desk lamp / cable organizer / mouse pad`
-- 运动出行：`yoga mat / resistance band / gym bag / travel organizer`
+### 浏览器行为
 
-每次选择一个方向后，页面会把 4 个候选送进现有采集队列，复用同一套 Shopee/Lazada adapter、collector health、Evidence、平台评分和 calibration，不维护第二套评分逻辑。
+- Windows / macOS / Linux 自动查找 Chrome / Chromium
+- 可以通过 `BROWSER_EXECUTABLE` 手工指定
+- 使用项目自己的 profile
+- CDP 默认 `9231`
+- 不复用系统日常浏览器 profile
 
-发现扫描为了第一轮筛选，新增候选默认使用 `10~15` 条/平台的小样本，并且 `tracking_enabled=false`，避免机会池自动污染每日跟踪。已存在的关键词只触发一次新 run，不会修改它原本的跟踪配置和样本设置。
+### 多标签页选择
 
-候选榜按 Evidence 等级优先，再看校准机会分，并显示：
+如果 Chrome 中同时存在：
 
-- 当前任务状态
-- Evidence A/B/C/D
-- 校准机会分与完整度
-- 双平台中位价参考
-- 排名最高的商品族
-- 商品族 `ranking_reliability`
+- Shopee/Lazada 首页
+- 搜索页
+- 验证码页
+- security/challenge 页
 
-这只是“自动候选池”的第一版，不等同于平台实时热销榜或外部趋势数据库。排名靠前的候选应再进入“关键词分析”做完整样本验证。
+系统不会再简单拿 `/json/list` 的第一个域名匹配项。
+
+正常采集优先：
+
+```text
+Shopee /search
+Lazada /catalog
+```
+
+人工验证优先：
+
+```text
+captcha / challenge / verify / security
+Shopee xiapibuy
+Lazada acs-m security host
+```
+
+并且按真实 hostname 匹配，不会因为查询参数里出现 `shopee.com.my` 就误认成 Shopee 页面。
+
+详细说明：
+
+```text
+docs/BROWSER_TABS.md
+```
+
+---
 
 ## 数据口径
 
-- 只使用页面公开可见信息，不登录平台账号，不调用卖家后台数据。
-- 公开已售数只在各平台内部解释，不跨平台直接比较。
-- 需求信号、进入门槛、价格空间均为启发式指标，不是利润或真实销量预测。
-- 搜索结果先做关键词相关性过滤；配件、明显多件装和低相关漂移不会进入机会评分。
-- `RM 10 - RM 40` 这类变体价格区间不会拿最低价冒充可比单价。
-- `1.2k+ sold/reviews` 等公开计数按页面表达解析；`2 units`、`1+1`、`buy 1 free 1` 等明显多件装默认排除。
-- 缺失字段保留为空，不填零，也不会把剩余权重放大；证据不足时明确显示“数据不足”。
-- 有稳定卖家标识时才启用卖家集中度；其权重按 seller identity 覆盖可靠度衰减，缺失时不猜。
-- 商品族排序来自重复标题属性的轻量聚类，用于缩小验证范围，不等同于平台官方类目。
+系统只使用页面公开可见信息。
 
-## 评分聚合校准
+不会：
 
-平台内部的 demand / entry_ease / price_room 仍然使用确定性的规则评分；校准层只处理“多个证据怎么合并”，不让 LLM 猜分。
+- 登录卖家后台
+- 调用商家私有数据
+- 推算真实 GMV
+- 推算真实月销量
+- 推算曝光率或转化率
+- 绕过验证码
+- 做浏览器指纹伪造
 
-- 双平台最终机会分按各平台 `confidence` 加权。高完整度平台比刚过门槛的平台影响更大。
-- 如果任一所选平台没有达到 eligible 门槛，仍然保持“数据不足”，不会靠另一个平台强行补出总分。
-- 商品族内部平台分也按 confidence 加权。
-- 小样本、只在一个平台出现、或 cluster confidence 较低的商品族会向 50 中性分收缩。
-- 商品族同时保留 `raw_opportunity_score` 与 `ranking_reliability`，页面显示校准分和排序可靠度，避免 4～8 条极端样本直接冲榜。
+### 搜索结果过滤
 
-这层逻辑在 `backend/app/services/marketplace/calibration.py`，和平台基础评分分开，便于单独测试和调整。
+进入机会评分前会过滤：
 
-## 采集健康度与证据等级
+- 明显配件 / replacement
+- spare part
+- cover / case
+- bundle
+- multipack
+- `1+1`
+- `buy 1 free 1`
+- `2 units`
+- 低关键词相关搜索漂移
 
-市场数据弱和采集器坏掉都可能表现为“样本少”，所以系统把这两件事分开判断。
+例如关键词：
 
-每个平台会记录 collector health：
+```text
+water bottle
+```
 
-- raw DOM 行数量和去重后的唯一商品数量
-- parsed 可解析商品数量与唯一商品解析率
-- 相对 `results_limit` 的样本覆盖
-- 价格、销量、评论、评分、卖家标识覆盖率
-- `healthy / degraded / unhealthy / empty / error` 状态和警告
+不会因为大量 bottle lid / replacement cap 的销量而直接给主体水杯加分。
 
-同一个商品在 DOM 中可能同时有图片链接、标题链接，因此 health 先按 `item_id / href` 去重 raw cards，再计算解析率，避免正常 DOM 重复造成假报警。
+### 价格
 
-如果页面明明有很多唯一 raw cards，但 parser 只能解析很少结果，会明确提示“页面结构可能变化”，不会只把它解释成市场需求弱。
+类似：
 
-综合分析同时给出 Evidence A/B/C/D：
+```text
+RM 10 - RM 40
+```
 
-- **A · 高可信**：双平台均达到评分门槛，完整度、采集健康度和样本量都高。
-- **B · 可参考**：核心证据可用，但平台数、完整度或样本量没有达到 A。
-- **C · 弱证据**：仍有参考信号，但不允许把弱证据包装成强推荐；原始“建议尝试”会降级为“谨慎观察”。
-- **D · 证据不足**：不输出强机会分/强选品结论，商品族 verdict 同样降为“数据不足”，并移除“最高商品族优先验证”这类强建议。
+不会简单拿 RM10 当作真实可比单价。
 
-分析页和 Excel 都会显示证据等级及 collector health，方便判断是“市场不行”还是“采集器不行”。
+### 公开计数
+
+支持：
+
+```text
+1.2k sold
+1.2k+ sold
+1.2k reviews
+```
+
+但不同平台公开 sold 的定义不保证一致，因此**只在平台内部解释，不直接跨平台比较绝对 sold 数**。
+
+---
+
+## 机会评分
+
+每个平台基础评分仍是确定性规则：
+
+```text
+需求信号      40%
+进入可行性    35%
+价格空间      25%
+```
+
+缺失字段：
+
+- 不填 0
+- 不把剩余权重放大到 100%
+- 缺失维度向中性证据处理
+- 完整度不足时直接“数据不足”
+
+### 卖家集中度
+
+有稳定 seller/shop identity 时才启用。
+
+真正进入评分的是归一化集中度指标；Top5 share 主要用于解释，不再直接把“小样本 Top5=100%”误判成严重垄断。
+
+卖家身份覆盖不足时，这个维度自动降权或不参与，不伪造数据。
+
+---
+
+## 跨平台 calibration
+
+平台基础评分完成后，再进入 calibration：
+
+- 双平台总机会分按 `confidence` 加权
+- 任一所选平台未达到 eligible 门槛时，不靠另一平台强行补总分
+- 商品族内部平台分同样按 confidence 加权
+- 小样本商品族向 50 中性分收缩
+- 单平台 cluster 会降低排名可靠度
+
+商品族保留：
+
+```text
+raw_opportunity_score
+opportunity_score
+ranking_reliability
+```
+
+避免 4~8 条极端样本直接冲到第一名。
+
+代码：
+
+```text
+backend/app/services/marketplace/calibration.py
+```
+
+---
+
+## Collector Health
+
+市场真的没数据和采集器坏了都可能表现成“样本少”，所以两者分开判断。
+
+每个平台记录：
+
+- raw DOM 行数
+- raw 唯一商品数
+- parsed 商品数
+- 解析率
+- 目标样本覆盖
+- price coverage
+- sold coverage
+- review coverage
+- rating coverage
+- seller identity coverage
+
+状态：
+
+```text
+healthy
+degraded
+unhealthy
+empty
+error
+```
+
+如果页面明明存在大量商品卡，但 parser 突然只能解析很少结果，会提示可能出现页面结构变化，而不是直接解读成“市场需求弱”。
+
+---
+
+## Evidence A/B/C/D
+
+综合以下证据：
+
+- 平台评分是否 eligible
+- 数据完整度
+- Collector Health
+- 相关样本量
+- 平台覆盖
+
+等级：
+
+### A · 高可信
+
+双平台证据完整，适合进入下一步验证。
+
+### B · 可参考
+
+核心数据可用，但完整度/平台/样本略弱。
+
+### C · 弱证据
+
+只能作为辅助信号。即使原始算法给出“建议尝试”，也会降级成“谨慎观察”。
+
+### D · 证据不足
+
+- 不输出强机会结论
+- 商品族 verdict 同样降为数据不足
+- 移除“最高商品族优先验证”一类强建议
+
+---
+
+## Temporal Evidence
+
+需要至少两次稳定快照。
+
+匹配方式：
+
+```text
+(platform, item_id)
+```
+
+指标包括：
+
+- matched items
+- match rate
+- activity share
+- sold delta
+- sold velocity / day
+- review delta
+- review velocity / day
+- price change
+- rank change
+- temporal reliability
+
+两次扫描间隔少于 6 小时会标为 weak，避免把平台刷新噪声当趋势。
+
+Temporal Evidence 当前只作为辅助证据，不直接修改主机会分。
+
+详细说明：
+
+```text
+docs/TEMPORAL_EVIDENCE.md
+```
+
+---
 
 ## 任务、历史与稳定结果
 
-每个 run 创建时会冻结本次 `keyword / platforms / results_limit`，所以运行过程中修改跟踪设置不会改变已经开始的任务口径。
+每个 run 创建时冻结：
 
-- `latest_run` 表示最近/当前任务，可能是 pending、running、failed 或 needs_verification。
-- `latest_result_run` 表示最近一次可用的 completed/partial 结果。
-- 新任务运行或失败时，分析、竞品和报告页面继续保留上一份稳定结果。
-- 分析页每 3 秒刷新一次当前状态（页面不可见时暂停轮询），新结果完成后自动替换上一份稳定结果。
-- failed/partial 点击重试会创建新的 run，不覆盖旧任务和旧快照。
-- 验证码属于同一次任务暂停，验证完成后继续原 run。
-- 所有平台都没有有效商品时任务会标记为 `failed`，不会生成伪 partial 报告。
+```text
+keyword
+platforms
+results_limit
+```
 
-运行中的 run 会保存 `worker_id` 和 `heartbeat_at`。scheduler 每 30 秒执行 watchdog：超过 `RUN_STALE_AFTER_SECONDS` 没有心跳的 running run 会恢复为 pending 并重新入队。checkpoint 与 finalize 都通过条件 UPDATE 验证当前 worker 租约；旧 worker 后续如果恢复，不能再覆盖新 worker 的 checkpoint 或最终结果。
+因此运行过程中修改长期关键词设置，不会改变已经开始的任务。
 
-现有本地数据库启动时会通过轻量 additive schema sync 自动补上新的 nullable heartbeat 列，不要求额外迁移框架。
+前端区分：
 
-Excel 的趋势页只纳入 completed/partial 快照，运行中、验证码暂停和失败任务的恢复 checkpoint 不参与趋势。
+```text
+latest_run
+latest_result_run
+```
+
+- `latest_run`：当前/最近任务，可能 pending、running、failed、needs_verification
+- `latest_result_run`：最近一次 completed / partial 稳定结果
+
+因此：
+
+- 新任务正在运行时，分析页继续显示上一份稳定结果
+- 新任务失败时，上一份稳定结果不会消失
+- Competitors / Reports / Dashboard / Analysis 页面在页面可见时自动刷新
+- 页面隐藏时暂停前端轮询，后端采集和 scheduler 不受影响
+
+---
+
+## Worker heartbeat 与恢复
+
+运行中的 `AnalysisRun` 保存：
+
+```text
+worker_id
+heartbeat_at
+```
+
+scheduler 定期检查 stale worker。
+
+普通任务仍然严格单 worker 串行，避免多个关键词同时操作浏览器。
+
+如果某个 worker 真正卡死：
+
+- watchdog 使旧 worker lease 失效
+- live stale recovery 使用独立 recovery executor 启动 replacement
+- replacement 获得新的 worker id
+- 旧 worker 即使后来恢复，也不能再 checkpoint / finalize 覆盖新结果
+
+这里仅使用普通 worker id + 时间戳，不引入签名、加密、额外密钥或复杂分布式锁。
+
+FastAPI lifespan 也使用 `try/finally` 保证正常关闭或异常退出时都会停止 scheduler。
+
+详细说明：
+
+```text
+docs/WORKER_RECOVERY.md
+```
+
+---
 
 ## 每日跟踪与人工验证
 
-默认计划由 `DEFAULT_DAILY_TIME` 和 `DEFAULT_TIMEZONE` 决定。所有关键词串行执行，应用错过当天时间后下一次启动只补跑当天一次，不追赶历史任务。
+默认计划：
 
-遇到验证码或风控页时任务会暂停为“需要人工验证”。在桌面环境点击“验证”会激活同一个项目 Chrome 标签页；手动完成验证后保持窗口打开，再点击“继续”。验证检测使用明确的 challenge/captcha 信号，不会因为普通的 `Verified Seller` 文案暂停任务。系统不会绕过验证码，也不做浏览器指纹伪造。
+```text
+DEFAULT_DAILY_TIME
+DEFAULT_TIMEZONE
+```
+
+关键词按队列串行执行。
+
+平台触发验证码时：
+
+1. run 进入 `needs_verification`
+2. 点击“验证”
+3. 项目 Chrome 激活真正的 challenge/security tab
+4. 用户手动完成验证码
+5. 保持 Chrome 窗口打开
+6. 点击“继续”
+
+系统不会自动绕过验证码。
+
+---
+
+## Excel 报告
+
+报告包含：
+
+- 综合结论
+- Shopee 竞品
+- Lazada 竞品
+- 每日价格与排名趋势
+- 数据口径说明
+
+趋势页只纳入：
+
+```text
+completed
+partial
+```
+
+不会把：
+
+```text
+running
+needs_verification
+failed
+```
+
+产生的恢复 checkpoint 混进正式趋势。
+
+---
 
 ## API
 
-- `GET /api/marketplace-defaults`：当前分析默认配置
-- `POST /api/keywords`：创建关键词并立即分析
-- `PATCH /api/keywords/{id}`：启停或修改每日跟踪
-- `POST /api/keywords/{id}/runs`：手动重新采集
-- `GET /api/runs/{id}`：任务进度与结论
-- `GET /api/runs/{id}/items`：竞品快照
-- `POST /api/runs/{id}/verification-browser`：激活人工验证浏览器
-- `POST /api/runs/{id}/resume`：验证后继续，或为 failed/partial 创建新 retry run
-- `GET /api/runs/{id}/report.xlsx`：下载 Excel
+主要接口：
+
+```text
+GET    /api/marketplace-defaults
+POST   /api/keywords
+GET    /api/keywords
+PATCH  /api/keywords/{id}
+POST   /api/keywords/{id}/runs
+POST   /api/discovery/keywords/{id}/deep-scan
+GET    /api/runs/{id}
+GET    /api/runs/{id}/items
+POST   /api/runs/{id}/verification-browser
+POST   /api/runs/{id}/resume
+GET    /api/runs/{id}/report.xlsx
+GET    /api/trends/keywords/{id}
+GET    /api/dashboard
+```
+
+---
+
+## 文档
+
+更细的实现说明：
+
+```text
+DOCS.md
+DEPLOY.md
+docs/MARKET_DISCOVERY.md
+docs/TEMPORAL_EVIDENCE.md
+docs/WORKER_RECOVERY.md
+docs/BROWSER_TABS.md
+docs/WINDOWS_LAUNCHERS.md
+docs/REPORT_SECURITY.md
+docs/STATIC_SERVING.md
+```
+
+---
+
+## 已知限制
+
+当前版本仍然有明确边界：
+
+1. **Discovery 还是 preset-based MVP**
+   - 不是全站自动扫描
+   - 不是官方趋势榜
+   - 还没有外部关键词/类目趋势源
+
+2. **商品族是轻量文本聚类**
+   - 用于缩小验证范围
+   - 不等同于平台官方类目或语义 embedding cluster
+
+3. **Lazada seller identity 覆盖可能较低**
+   - 缺稳定 seller/shop identity 时不会强算卖家集中度
+
+4. **Temporal Evidence 仍是辅助证据**
+   - 当前不会自动改变主机会分
+   - 需要至少两次稳定快照
+
+5. **公开页面结构会变化**
+   - Collector Health 会尽量区分市场数据弱和 parser 异常
+   - adapter 仍需要持续维护
+
+6. **机会分不是利润预测**
+   - 不包含真实采购、物流、广告、平台费和退货成本
+
+---
 
 ## 测试
 
+后端：
+
 ```bash
 cd backend
-venv/bin/python -m unittest discover -s tests -v
-cd ../frontend
+python -m unittest discover -s tests -v
+```
+
+前端：
+
+```bash
+cd frontend
+npm ci
 npm run build
 ```
 
-GitHub Actions 同时执行后端 unittest 与前端 TypeScript/Vite build。
+GitHub Actions 会同时运行：
+
+- backend unittest
+- frontend TypeScript / Vite build
+
+建议所有功能改动都在 CI 全绿后再合入 `main`。
