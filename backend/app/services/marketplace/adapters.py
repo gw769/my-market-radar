@@ -38,13 +38,16 @@ class MarketplaceListing:
         return asdict(self)
 
 
-def parse_money(value: Any) -> float | None:
+def parse_money(value: Any, require_currency: bool = False) -> float | None:
     if value is None:
         return None
     text = str(value).replace(",", "")
     match = re.search(r"RM\s*([0-9]+(?:\.[0-9]{1,2})?)", text, re.I)
-    if not match:
-        match = re.search(r"([0-9]+(?:\.[0-9]{1,2})?)", text)
+    if match:
+        return float(match.group(1))
+    if require_currency:
+        return None
+    match = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]{1,2})?)\s*", text)
     return float(match.group(1)) if match else None
 
 
@@ -74,6 +77,16 @@ def _quality(raw: dict[str, Any]) -> float:
     return round((sum(v not in (None, "") for v in core) * 0.2) + (sum(v not in (None, "") for v in detail) * 0.1), 2)
 
 
+def _safe_rating(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        rating = float(value)
+    except (TypeError, ValueError):
+        return None
+    return rating if 0 <= rating <= 5 else None
+
+
 class MarketplaceAdapter:
     platform: str
     blocked_hosts: tuple[str, ...] = ()
@@ -87,11 +100,8 @@ class MarketplaceAdapter:
 
     def is_verification_page(self, url: str, body_text: str = "") -> bool:
         parsed = urlparse(url)
-        haystack = f"{parsed.netloc} {parsed.path} {body_text[:1200]}".lower()
-        signals = (
-            "captcha", "verify", "verification", "punish", "robot check",
-            "security check", "unusual traffic", "suspicious activity",
-        )
+        haystack = f"{parsed.netloc} {parsed.path} {body_text[:1600]}".lower()
+        signals = ("captcha", "verify", "verification", "punish", "robot check", "security check", "unusual traffic", "suspicious activity", "drag the slider")
         return any(host in parsed.netloc.lower() for host in self.blocked_hosts) or any(s in haystack for s in signals)
 
     def parse_cards(self, cards: list[dict[str, Any]], limit: int) -> list[MarketplaceListing]:
@@ -126,12 +136,17 @@ class ShopeeMalaysiaAdapter(MarketplaceAdapter):
           const image = card?.querySelector('img');
           const href = a.href;
           const id = href.match(/-i\.(\d+)\.(\d+)/);
+          const ratingNode = card?.querySelector('[aria-label*="rating" i], [class*="rating" i]');
+          const ratingText = (ratingNode?.getAttribute('aria-label') || ratingNode?.textContent || '');
           const price = text.match(/RM\s*[0-9,.]+/i)?.[0] || null;
           const sold = text.match(/[0-9,.]+\s*[km]?\s*(?:sold|terjual)/i)?.[0] || null;
-          const rating = text.match(/\b[0-5]\.[0-9]\b/)?.[0] || null;
+          const reviews = text.match(/([0-9,.]+\s*[km]?)\s*(?:reviews?|ratings?|ulasan|penilaian)/i)?.[1]
+            || text.match(/\(([0-9,.]+\s*[km]?)\)/)?.[1] || null;
+          const rating = ratingText.match(/\b[0-5](?:\.[0-9])?\b/)?.[0]
+            || text.match(/\b[3-5]\.[0-9]\b/)?.[0] || null;
           return {href, text, title: a.getAttribute('aria-label') || a.title || text.split('\n')[0],
-            image: image?.currentSrc || image?.src || null, price, sold, rating,
-            reviews: null, seller: null, location: text.split('\n').slice(-1)[0] || null,
+            image: image?.currentSrc || image?.src || null, price, sold, rating, reviews,
+            seller: null, location: text.split('\n').slice(-1)[0] || null,
             sponsored: /sponsored|iklan/i.test(text), shop_id: id?.[1] || null, item_id: id?.[2] || null};
         })"""
 
@@ -149,7 +164,8 @@ class ShopeeMalaysiaAdapter(MarketplaceAdapter):
         if not title:
             return None
         sold_text = raw.get("sold") or _first_match((r"([0-9,.]+\s*[km]?)\s*(?:sold|terjual)",), text)
-        rating_text = raw.get("rating") or _first_match((r"\b([0-5]\.[0-9])\b",), text)
+        review_text = raw.get("reviews") or _first_match((r"([0-9,.]+\s*[km]?)\s*(?:reviews?|ratings?|ulasan|penilaian)", r"\(([0-9,.]+\s*[km]?)\)"), text)
+        price = parse_money(raw.get("price")) if raw.get("price") else parse_money(text, require_currency=True)
         return MarketplaceListing(
             platform=self.platform,
             item_id=item_id,
@@ -157,10 +173,10 @@ class ShopeeMalaysiaAdapter(MarketplaceAdapter):
             title=title[:1000],
             product_url=href.split("?")[0],
             image_url=raw.get("image"),
-            price=parse_money(raw.get("price") or text),
+            price=price,
             sold_count=parse_compact_count(sold_text),
-            rating=float(rating_text) if rating_text else None,
-            review_count=parse_compact_count(raw.get("reviews")),
+            rating=_safe_rating(raw.get("rating")),
+            review_count=parse_compact_count(review_text),
             seller_name=raw.get("seller"),
             seller_location=raw.get("location"),
             is_sponsored=bool(raw.get("sponsored")) if raw.get("sponsored") is not None else None,
@@ -185,13 +201,16 @@ class LazadaMalaysiaAdapter(MarketplaceAdapter):
           const image = card?.querySelector('img');
           const href = a.href;
           const itemId = card?.getAttribute('data-item-id') || href.match(/-i(\d+)-/i)?.[1] || href.match(/\/products\/[^/]*-(\d+)\.html/i)?.[1];
+          const ratingNode = card?.querySelector('[aria-label*="rating" i], [class*="rating" i]');
+          const ratingText = (ratingNode?.getAttribute('aria-label') || ratingNode?.textContent || '');
           return {href, text, title: a.title || a.getAttribute('aria-label') || text.split('\n')[0],
             image: image?.currentSrc || image?.src || null,
             price: text.match(/RM\s*[0-9,.]+/i)?.[0] || null,
             original_price: Array.from(text.matchAll(/RM\s*[0-9,.]+/ig))[1]?.[0] || null,
             sold: text.match(/[0-9,.]+\s*[km]?\s*(?:sold|terjual)/i)?.[0] || null,
-            rating: text.match(/\b[0-5]\.[0-9]\b/)?.[0] || null,
-            reviews: text.match(/\(([0-9,.]+\s*[km]?)\)/)?.[1] || null,
+            rating: ratingText.match(/\b[0-5](?:\.[0-9])?\b/)?.[0] || text.match(/\b[3-5]\.[0-9]\b/)?.[0] || null,
+            reviews: text.match(/\(([0-9,.]+\s*[km]?)\)/)?.[1]
+              || text.match(/([0-9,.]+\s*[km]?)\s*(?:reviews?|ratings?|ulasan|penilaian)/i)?.[1] || null,
             seller: null, location: text.split('\n').slice(-1)[0] || null,
             sponsored: /sponsored|iklan/i.test(text), item_id: itemId || null, shop_id: null};
         })"""
@@ -211,11 +230,11 @@ class LazadaMalaysiaAdapter(MarketplaceAdapter):
             title = next((line for line in lines if not line.lower().startswith("rm")), "")
         if not title:
             return None
-        price = parse_money(raw.get("price") or text)
+        price = parse_money(raw.get("price")) if raw.get("price") else parse_money(text, require_currency=True)
         original = parse_money(raw.get("original_price"))
         discount = round((original - price) / original * 100, 1) if original and price and original > price else None
         sold_text = raw.get("sold") or _first_match((r"([0-9,.]+\s*[km]?)\s*(?:sold|terjual)",), text)
-        rating_text = raw.get("rating") or _first_match((r"\b([0-5]\.[0-9])\b",), text)
+        review_text = raw.get("reviews") or _first_match((r"\(([0-9,.]+\s*[km]?)\)", r"([0-9,.]+\s*[km]?)\s*(?:reviews?|ratings?|ulasan|penilaian)"), text)
         return MarketplaceListing(
             platform=self.platform,
             item_id=item_id,
@@ -227,8 +246,8 @@ class LazadaMalaysiaAdapter(MarketplaceAdapter):
             original_price=original,
             discount_percent=discount,
             sold_count=parse_compact_count(sold_text),
-            rating=float(rating_text) if rating_text else None,
-            review_count=parse_compact_count(raw.get("reviews")),
+            rating=_safe_rating(raw.get("rating")),
+            review_count=parse_compact_count(review_text),
             seller_name=raw.get("seller"),
             seller_location=raw.get("location"),
             is_sponsored=bool(raw.get("sponsored")) if raw.get("sponsored") is not None else None,
