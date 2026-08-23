@@ -34,6 +34,12 @@ worker 周期续租。scheduler 每 30 秒检查 `running` run，超过 `RUN_STA
 
 这里仍然只是普通 worker 标识和数据库状态控制，不使用签名、加密或额外密钥。
 
+## 应用关闭
+
+FastAPI lifespan 在启动 scheduler 后使用 `try/finally` 包住运行阶段。无论服务正常退出，还是 lifespan body 因异常退出，都会调用 `stop_scheduler()` 再结束应用。
+
+这避免开发重载、测试异常或关闭阶段错误让 scheduler 线程跳过显式收口。对应测试同时覆盖正常退出和异常退出两条路径。
+
 ## 并发边界
 
 stale replacement 极少数情况下可能和正在苏醒的旧浏览器调用短暂重叠，但旧 worker 已经失去数据库租约，不能提交 checkpoint 或最终结果。正常非 stale 任务仍不会并发执行。
