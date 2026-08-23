@@ -1,6 +1,7 @@
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { BarChart3, BrainCircuit, Compass, FileSpreadsheet, LayoutDashboard, LogOut, Radar, RefreshCw, Search, Store, User } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
+import "./layout-overrides.css";
 
 const NAV = [
   { to: "/dashboard", label: "总览", mobileLabel: "总览", Icon: LayoutDashboard },
