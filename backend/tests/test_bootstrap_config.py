@@ -25,6 +25,16 @@ class BootstrapAndConfigTests(unittest.TestCase):
     def tearDown(self):
         self.engine.dispose()
 
+    def test_runtime_rejects_public_or_short_jwt_secret(self):
+        for secret in ("", "short", "dev-secret-key-change-in-production", "please-change-me-to-a-random-32-char-string"):
+            with self.subTest(secret=secret), patch.object(main.settings, "SECRET_KEY", secret):
+                with self.assertRaises(RuntimeError):
+                    main._validate_runtime_security()
+
+    def test_runtime_accepts_long_private_jwt_secret(self):
+        with patch.object(main.settings, "SECRET_KEY", "a-private-random-secret-key-that-is-long-enough"):
+            main._validate_runtime_security()
+
     def test_empty_password_does_not_create_known_admin(self):
         with patch("app.core.database.SessionLocal", self.Session), patch.object(
             main.settings, "BOOTSTRAP_ADMIN_PASSWORD", ""
