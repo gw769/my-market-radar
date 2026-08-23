@@ -16,9 +16,6 @@ def _configure_sqlite_connection(dbapi_connection, _connection_record) -> None:
     try:
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
-        # WAL allows readers and the single collector/scheduler writer to overlap much more
-        # gracefully than SQLite's default rollback journal. In-memory SQLite may answer
-        # 'memory' here instead of WAL, which is fine for tests.
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA synchronous=NORMAL")
     finally:
@@ -37,7 +34,7 @@ def _sync_engine_options(db_type: str) -> dict:
 
 
 def _create_sync_engine():
-    requested_type = settings.DATABASE_TYPE.lower()
+    requested_type = settings.DATABASE_TYPE
     try:
         engine = create_engine(
             settings.DATABASE_URL,
@@ -51,11 +48,16 @@ def _create_sync_engine():
         logger.info("数据库连接成功: %s", requested_type)
         return engine, requested_type
     except Exception as exc:
-        logger.warning("%s 数据库连接失败: %s", requested_type, exc)
+        logger.error("%s 数据库连接失败: %s", requested_type, exc)
         if requested_type != "mysql":
             raise
+        if not settings.ALLOW_DATABASE_FALLBACK:
+            raise RuntimeError(
+                "已显式配置 MySQL，但数据库不可用。为避免静默切到空 SQLite，应用已停止；"
+                "修复 MySQL 连接，或明确设置 ALLOW_DATABASE_FALLBACK=true。"
+            ) from exc
 
-    logger.warning("自动降级到 SQLite 数据库")
+    logger.warning("已明确允许数据库降级：MySQL 不可用，切换到 SQLite")
     sqlite_url = f"sqlite:///{settings.data_path / 'marketplace_ai.db'}"
     engine = create_engine(
         sqlite_url,
