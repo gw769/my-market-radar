@@ -1,3 +1,4 @@
+import threading
 import unittest
 from unittest.mock import Mock, patch
 
@@ -72,6 +73,38 @@ class RunnerStateTests(unittest.TestCase):
         request = runner._collection_request(run, keyword)
         self.assertEqual(request.platforms, ["shopee", "lazada"])
         self.assertEqual(request.results_limit, 20)
+        db.close()
+
+    def test_concurrent_create_run_returns_one_active_attempt(self):
+        barrier = threading.Barrier(6)
+        run_ids: list[int] = []
+        errors: list[Exception] = []
+        result_lock = threading.Lock()
+
+        def worker():
+            db = self.Session()
+            try:
+                barrier.wait(timeout=5)
+                run = runner.create_run(db, self.keyword)
+                with result_lock:
+                    run_ids.append(run.id)
+            except Exception as exc:  # pragma: no cover - assertion below reports details
+                with result_lock:
+                    errors.append(exc)
+            finally:
+                db.close()
+
+        threads = [threading.Thread(target=worker) for _ in range(6)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+
+        self.assertFalse(errors, errors)
+        self.assertEqual(len(run_ids), 6)
+        self.assertEqual(len(set(run_ids)), 1)
+        db = self.Session()
+        self.assertEqual(db.query(AnalysisRun).filter_by(keyword_id=self.keyword_id).count(), 1)
         db.close()
 
     def test_submit_during_finishing_worker_is_requeued_not_lost(self):
