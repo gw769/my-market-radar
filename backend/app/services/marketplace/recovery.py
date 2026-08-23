@@ -20,7 +20,8 @@ def _utcnow() -> datetime:
 
 def _reset_for_recovery(run: AnalysisRun, step: str) -> None:
     run.status = "pending"
-    run.progress = 0
+    # Recovery reuses the same run, so keep the highest user-visible checkpoint. The resumed
+    # worker and runner state writes are monotonic and will advance it from here.
     run.current_step = step
     run.started_at = None
     run.completed_at = None

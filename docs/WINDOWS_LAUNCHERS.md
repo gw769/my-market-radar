@@ -14,7 +14,7 @@ start_local.bat
 2. `backend\venv\Scripts\python.exe`
 3. 系统 `python`
 
-找到虚拟环境后会用它运行根目录 `start.py`。`start.py` 再启动本机 `uvicorn app.main:app`，监听 `127.0.0.1:8011`，并打开项目专用 Chrome/Chromium。
+找到虚拟环境后会用它运行根目录 `start.py`。`start.py` 再启动本机 `uvicorn app.main:app`，监听 `127.0.0.1:8011`。正式使用 `BROWSER_MODE=extension` 时，应用复用用户自己已登录的普通 Google Chrome；只有开发用 `BROWSER_MODE=cdp` fallback 才会启动项目专用 Chrome/Chromium。
 
 ## 本机停止
 
@@ -29,7 +29,7 @@ stop.bat
 - 先停止窗口标题为 `MY Market Radar` 的本机 launcher 进程树；
 - 如果 8011 仍有监听，只在进程命令行能识别出 `uvicorn app.main:app`、`start.py` 或 `my-market-radar` 时才停止；
 - 如果 8011 的进程无法确认属于本项目，只显示警告，不按端口强杀；
-- 9231 是 MY Market Radar 保留的项目 Chrome CDP 端口，因此会停止该监听进程；
+- 9231 仅属于可选的 `BROWSER_MODE=cdp` 开发 fallback；extension 正式路径不会使用或停止用户普通 Chrome；
 - 3000 经常被其他前端项目使用，只报告占用 PID，**绝不自动停止**。
 
 以前的 `stop.bat` 会直接杀任何监听 8011/3000 的进程，可能误伤其他开发项目，甚至在 Docker 场景下误杀 Docker Desktop 相关进程。当前版本不再这么做。

@@ -47,6 +47,41 @@ class CollectorHealthTests(unittest.TestCase):
         self.assertEqual(health["parse_ratio"], 100.0)
         self.assertEqual(health["status"], "healthy")
 
+    def test_raw_dom_surplus_is_not_counted_as_a_parser_failure(self):
+        rows = [listing(shop_id=f"shop-{index}") for index in range(45)]
+        raw = [{"item_id": f"item-{index}"} for index in range(120)]
+
+        health = assess_collection_health(raw, rows, 45)
+
+        self.assertEqual(health["raw_count"], 120)
+        self.assertEqual(health["parse_sample_size"], 45)
+        self.assertEqual(health["parsed_count"], 45)
+        self.assertEqual(health["parse_ratio"], 100.0)
+        self.assertFalse(any("页面结构变化" in warning for warning in health["warnings"]))
+        self.assertEqual(health["status"], "healthy")
+
+    def test_sample_cap_does_not_hide_real_parser_failures(self):
+        raw = [{"item_id": f"item-{index}"} for index in range(120)]
+
+        health = assess_collection_health(raw, [listing(), listing()], 45)
+
+        self.assertEqual(health["parse_sample_size"], 45)
+        self.assertLess(health["parse_ratio"], 5)
+        self.assertTrue(any("页面结构变化" in warning for warning in health["warnings"]))
+        self.assertEqual(health["status"], "unhealthy")
+
+    def test_less_than_half_of_requested_sample_cannot_be_healthy(self):
+        raw = [{"item_id": f"item-{index}"} for index in range(120)]
+        rows = [listing(shop_id=f"shop-{index}") for index in range(20)]
+
+        health = assess_collection_health(raw, rows, 45)
+
+        self.assertEqual(health["parse_sample_size"], 45)
+        self.assertEqual(health["parsed_count"], 20)
+        self.assertEqual(health["parse_ratio"], 44.4)
+        self.assertEqual(health["status"], "degraded")
+        self.assertTrue(any("页面结构变化" in warning for warning in health["warnings"]))
+
     def test_error_platform_makes_overall_health_unhealthy(self):
         good_raw = [{"item_id": f"item-{index}"} for index in range(20)]
         good = assess_collection_health(good_raw, [listing() for _ in range(20)], 20)

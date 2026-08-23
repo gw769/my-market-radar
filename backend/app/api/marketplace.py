@@ -224,7 +224,7 @@ def verification_browser(run_id: int, db: Session = Depends(get_db), current_use
         url = open_verification_browser(run.id)
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return {"success": True, "url": url, "message": "完成验证后保持项目 Chrome 窗口打开，再点击继续采集。"}
+    return {"success": True, "url": url, "message": "完成验证后保持该验证标签页打开，再点击继续采集。"}
 
 
 @router.post("/runs/{run_id}/resume")
@@ -240,7 +240,6 @@ def resume_run(run_id: int, db: Session = Depends(get_db), current_user: User = 
         return {"success": True, "queued": queued, "run": _run_payload(retry), "retry_of": run.id}
 
     run.status = "pending"
-    run.progress = 0
     run.current_step = "等待验证后重新采集"
     run.error_message = None
     run.verification_platform = None

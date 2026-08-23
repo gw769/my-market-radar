@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     BROWSER_START_TIMEOUT_SECONDS: float = Field(default=8.0, ge=1.0, le=60.0)
     BROWSER_HEADLESS_FALLBACK: bool = True
     EXTENSION_UPDATE_BASE_URL: str = "http://127.0.0.1:8011/browser-extension"
-    COLLECTION_TIMEOUT_SECONDS: int = Field(default=45, ge=5, le=120)
+    COLLECTION_TIMEOUT_SECONDS: int = Field(default=60, ge=5, le=120)
     RUN_HEARTBEAT_SECONDS: int = Field(default=10, ge=3, le=60)
     RUN_STALE_AFTER_SECONDS: int = Field(default=240, ge=60, le=1800)
     DEFAULT_RESULTS_LIMIT: int = Field(default=20, ge=10, le=40)

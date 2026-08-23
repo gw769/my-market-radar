@@ -35,7 +35,16 @@ def assess_collection_health(
     raw_rows = len(raw_cards)
     raw_count = _unique_raw_count(raw_cards)
     parsed_count = len(listings)
-    parse_ratio = parsed_count / raw_count if raw_count else (1.0 if parsed_count else 0.0)
+    # The adapters deliberately select at most ``target_limit`` rows even when the visible DOM
+    # contains more cards (for example Lazada commonly exposes about 40 cards while a run asks
+    # for 15).  Those unselected cards are not parser failures.  Keep the full raw count for
+    # diagnostics, but evaluate parser success only across the requested sample capacity.
+    parse_sample_size = min(raw_count, max(1, target_limit)) if raw_count else 0
+    parse_ratio = (
+        parsed_count / parse_sample_size
+        if parse_sample_size
+        else (1.0 if parsed_count else 0.0)
+    )
     # Defensive cap: a parser can occasionally synthesize one row from a card variant. Health
     # should never exceed 100% merely because raw-card identity was incomplete.
     parse_ratio = min(1.0, parse_ratio)
@@ -77,7 +86,7 @@ def assess_collection_health(
         status = "unhealthy"
     elif parsed_count == 0:
         status = "empty"
-    elif score < 60:
+    elif parse_ratio < 0.5 or target_coverage < 0.5 or score < 60:
         status = "degraded"
     else:
         status = "healthy"
@@ -87,6 +96,7 @@ def assess_collection_health(
         "health_score": round(max(0.0, min(100.0, score)), 1),
         "raw_rows": raw_rows,
         "raw_count": raw_count,
+        "parse_sample_size": parse_sample_size,
         "parsed_count": parsed_count,
         "target_limit": target_limit,
         "parse_ratio": round(parse_ratio * 100, 1),

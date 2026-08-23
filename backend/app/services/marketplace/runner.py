@@ -11,7 +11,9 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
+from sqlalchemy import case
 from sqlalchemy.orm import Session
 from websockets.asyncio.client import connect as websocket_connect
 
@@ -21,17 +23,19 @@ from app.core.logging import logger
 from app.models.marketplace import AnalysisRun, ListingSnapshot, TrackedKeyword
 from app.services.marketplace.adapters import ADAPTERS, MarketplaceListing, VerificationRequired
 from app.services.marketplace.browser import (
-    activate_platform_tab,
+    activate_locked_platform_tab,
+    activate_tab,
     browser_ready,
     ensure_browser,
     ensure_platform_tab,
     find_platform_tab,
+    find_platform_tab_by_id,
 )
 from app.services.marketplace.calibration import calibrate_analysis
 from app.services.marketplace.evidence import build_evidence_summary
-from app.services.marketplace.extension_bridge import extension_request
+from app.services.marketplace.extension_bridge import ExtensionBridgeError, extension_request
 from app.services.marketplace.health import assess_collection_health, summarize_collector_health
-from app.services.marketplace.raw_collection import RawCardAccumulator
+from app.services.marketplace.raw_collection import RawCardAccumulator, raw_card_key
 from app.services.marketplace.query_localization import marketplace_search_term
 from app.services.marketplace.scoring import build_analysis
 
@@ -43,8 +47,48 @@ _queued_run_ids: set[int] = set()
 _requeue_requested: set[int] = set()
 _process_worker_id = uuid.uuid4().hex[:12]
 
+_EXTENSION_WAKE_PROBE_SECONDS = 3.0
+_EXTENSION_ATTACH_FIRST_SECONDS = 35.0
+_EXTENSION_ATTACH_RETRY_SECONDS = 40.0
+_PAGE_POLL_INTERVAL_SECONDS = 0.8
+_PAGE_MAX_SECONDS = 60.0
+_PAGE_NAVIGATION_MAX_SECONDS = 12.0
+_PAGE_FIRST_RESULTS_MAX_SECONDS = 25.0
+_PAGE_TARGET_STABLE_ROUNDS = 4
+_PAGE_BOTTOM_STABLE_ROUNDS = 4
+_PAGE_STATE_EXPRESSION = r"""(() => {
+  const root = document.documentElement;
+  const body = document.body;
+  const viewportHeight = Math.max(window.innerHeight || 0, 1);
+  const scrollHeight = Math.max(root?.scrollHeight || 0, body?.scrollHeight || 0);
+  return {
+    marker: 'my-market-radar-page-state',
+    href: location.href,
+    readyState: document.readyState,
+    visibilityState: document.visibilityState,
+    collectorDocumentNonce: typeof window.__MY_MARKET_RADAR_DOCUMENT_NONCE__ === 'string'
+      ? window.__MY_MARKET_RADAR_DOCUMENT_NONCE__
+      : '',
+    bodyText: body ? (body.innerText || '').slice(0, 5000) : '',
+    scrollY: window.scrollY || 0,
+    viewportHeight,
+    scrollHeight,
+    atBottom: viewportHeight + (window.scrollY || 0) >= scrollHeight - 24
+  };
+})()"""
+
 
 class WorkerLeaseLost(RuntimeError):
+    pass
+
+
+class PageCollectionError(RuntimeError):
+    def __init__(self, message: str, page_diagnostics: list[dict[str, Any]]):
+        super().__init__(message)
+        self.page_diagnostics = page_diagnostics
+
+
+class PageDeadlineExceeded(RuntimeError):
     pass
 
 
@@ -177,6 +221,13 @@ def _save_state(run_id: int, worker_id: str | None = None, **values: Any) -> boo
     try:
         query = db.query(AnalysisRun).filter(AnalysisRun.id == run_id)
         payload = dict(values)
+        requested_progress = payload.pop("progress", None)
+        if requested_progress is not None:
+            requested_progress = int(requested_progress)
+            payload[AnalysisRun.progress] = case(
+                (AnalysisRun.progress < requested_progress, requested_progress),
+                else_=AnalysisRun.progress,
+            )
         if worker_id is not None:
             query = query.filter(AnalysisRun.worker_id == worker_id, AnalysisRun.status == "running")
             payload["heartbeat_at"] = _utcnow()
@@ -266,21 +317,67 @@ async def _cdp_call(socket: Any, request_id: int, method: str, params: dict[str,
 class _ExtensionCDPSocket:
     """Small socket-compatible adapter over the user's main Chrome extension."""
 
-    def __init__(self, platform: str, url: str):
+    def __init__(self, platform: str, url: str, lock_key: str):
         self.platform = platform
         self.url = url
+        self.lock_key = lock_key
         self.session_id = ""
+        self.lock_owner = ""
+        self.tab_id = ""
+        self._preserve_lock = False
         self._responses: asyncio.Queue[str] = asyncio.Queue()
 
+    def preserve_lock(self) -> None:
+        self._preserve_lock = True
+
     async def __aenter__(self) -> "_ExtensionCDPSocket":
-        payload = await asyncio.to_thread(
-            extension_request,
-            "attach",
-            max(10.0, float(settings.COLLECTION_TIMEOUT_SECONDS)),
-            platform=self.platform,
-            url=self.url,
-        )
+        # Extension 1.0.2 stopped its poll burst as soon as the previous platform detached.
+        # A short, disposable tabs request catches an already-awake worker; if it times out the
+        # bridge removes it from the queue and the following attach remains ready for the next
+        # MV3 alarm.  Retrying attach once also recovers the race where Chrome completed the
+        # first attach just after the backend's bounded wait expired.
+        try:
+            await asyncio.to_thread(
+                extension_request,
+                "tabs",
+                _EXTENSION_WAKE_PROBE_SECONDS,
+            )
+        except ExtensionBridgeError:
+            pass
+
+        configured_timeout = float(settings.COLLECTION_TIMEOUT_SECONDS)
+        first_timeout = max(10.0, min(configured_timeout, _EXTENSION_ATTACH_FIRST_SECONDS))
+        try:
+            payload = await asyncio.to_thread(
+                extension_request,
+                "attach",
+                first_timeout,
+                platform=self.platform,
+                url=self.url,
+                lock_key=self.lock_key,
+            )
+        except ExtensionBridgeError as exc:
+            if "响应超时" not in str(exc):
+                raise
+            logger.warning(
+                "主 Chrome %s 首次 attach 超时，执行一次有界重试",
+                self.platform,
+            )
+            retry_timeout = max(
+                10.0,
+                min(configured_timeout, _EXTENSION_ATTACH_RETRY_SECONDS),
+            )
+            payload = await asyncio.to_thread(
+                extension_request,
+                "attach",
+                retry_timeout,
+                platform=self.platform,
+                url=self.url,
+                lock_key=self.lock_key,
+            )
         self.session_id = str((payload or {}).get("session_id") or "")
+        self.lock_owner = str((payload or {}).get("lock_owner") or "")
+        self.tab_id = str((payload or {}).get("tab_id") or "")
         if not self.session_id:
             raise RuntimeError(f"无法连接你的 Chrome {self.platform.title()} 标签页")
         return self
@@ -288,6 +385,19 @@ class _ExtensionCDPSocket:
     async def __aexit__(self, _exc_type: Any, _exc: Any, _tb: Any) -> None:
         if not self.session_id:
             return
+        if not self._preserve_lock:
+            try:
+                await asyncio.to_thread(
+                    extension_request,
+                    "release_platform_lock",
+                    5.0,
+                    platform=self.platform,
+                    lock_key=self.lock_key,
+                    lock_owner=self.lock_owner,
+                )
+            except Exception:
+                # Extension 1.0.2/1.0.3 does not implement run-scoped locks.
+                logger.debug("主 Chrome 扩展不支持释放 run 锁", exc_info=True)
         try:
             await asyncio.to_thread(
                 extension_request,
@@ -321,6 +431,74 @@ class _ExtensionCDPSocket:
 
 def _runtime_value(result: dict[str, Any], default: Any = None) -> Any:
     return result.get("result", {}).get("value", default)
+
+
+def _normalized_query_value(parsed: Any, name: str) -> str:
+    values = parse_qs(parsed.query, keep_blank_values=True).get(name) or []
+    return " ".join(str(values[0] if values else "").split()).casefold()
+
+
+def _search_page_url_matches(adapter: Any, expected_url: str, actual_url: str) -> bool:
+    """Confirm the attached tab reached the requested marketplace result page."""
+    try:
+        expected = urlparse(expected_url)
+        actual = urlparse(actual_url)
+    except ValueError:
+        return False
+    expected_host = (expected.hostname or "").lower().removeprefix("www.")
+    actual_host = (actual.hostname or "").lower().removeprefix("www.")
+    if not expected_host or actual_host != expected_host:
+        return False
+    if actual.path.rstrip("/").lower() != expected.path.rstrip("/").lower():
+        return False
+
+    query_name = "keyword" if adapter.platform == "shopee" else "q"
+    if _normalized_query_value(actual, query_name) != _normalized_query_value(expected, query_name):
+        return False
+
+    default_page = 0 if adapter.platform == "shopee" else 1
+    expected_page = _normalized_query_value(expected, "page") or str(default_page)
+    actual_page = _normalized_query_value(actual, "page") or str(default_page)
+    try:
+        return int(actual_page) == int(expected_page)
+    except ValueError:
+        return False
+
+
+def _raw_keys(cards: list[dict[str, Any]]) -> set[str]:
+    return {raw_card_key(card) for card in cards if isinstance(card, dict)}
+
+
+def _grid_is_stale(current_keys: set[str], previous_page_keys: set[str]) -> bool:
+    # Virtualized grids may unmount most previous cards during navigation.  An old 20-card
+    # viewport is therefore commonly only a subset of the prior page's 40-60 accumulated keys.
+    # A genuinely new page can still repeat a few ads, but one rotating ad must not make a
+    # 19/20-old grid look fresh.  Small exact subsets remain stale; larger grids use an 80%
+    # overlap threshold.
+    if not current_keys or not previous_page_keys:
+        return False
+    if current_keys.issubset(previous_page_keys):
+        return True
+    overlap = len(current_keys & previous_page_keys)
+    return len(current_keys) >= 6 and overlap / len(current_keys) >= 0.80
+
+
+def _run_lock_key(run_id: int, platform: str) -> str:
+    return f"run:{int(run_id)}:{platform}"
+
+
+def _card_grid_signature(
+    cards: list[dict[str, Any]],
+    accumulated_count: int,
+    page_state: dict[str, Any],
+) -> tuple[Any, ...]:
+    normalized_cards = json.dumps(cards, ensure_ascii=False, sort_keys=True, default=str)
+    return (
+        accumulated_count,
+        int(page_state.get("scrollHeight") or 0),
+        int(page_state.get("scrollY") or 0),
+        normalized_cards,
+    )
 
 
 def _positive_int(value: Any, fallback: int) -> int:
@@ -367,10 +545,23 @@ async def _collect_resident_tab(
     search_pages: int,
     run_id: int,
     worker_id: str,
-) -> tuple[str, str, list[dict[str, Any]], list[MarketplaceListing], list[str]]:
+    progress_start: int = 10,
+    progress_end: int = 65,
+) -> tuple[
+    str,
+    str,
+    list[dict[str, Any]],
+    list[MarketplaceListing],
+    list[str],
+    list[dict[str, Any]],
+]:
     url = adapter.search_url(keyword)
     if settings.BROWSER_MODE == "extension":
-        socket_context: Any = _ExtensionCDPSocket(adapter.platform, url)
+        socket_context: Any = _ExtensionCDPSocket(
+            adapter.platform,
+            url,
+            _run_lock_key(run_id, adapter.platform),
+        )
     else:
         tab = ensure_platform_tab(adapter.platform, url)
         websocket_url = tab.get("webSocketDebuggerUrl")
@@ -386,120 +577,382 @@ async def _collect_resident_tab(
     seen_item_ids: set[str] = set()
     listings_by_id: dict[str, MarketplaceListing] = {}
     page_warnings: list[str] = []
+    page_diagnostics: list[dict[str, Any]] = []
+    previous_page_keys: set[str] = set()
     last_heartbeat = 0.0
+    _require_lease(
+        run_id,
+        worker_id,
+        progress=progress_start,
+        current_step=f"正在唤醒已登录 Chrome · {adapter.platform.title()} Malaysia",
+    )
     async with socket_context as socket:
         request_id = 1
-        await _cdp_call(socket, request_id, "Page.enable")
-        request_id += 1
-        await _cdp_call(socket, request_id, "Runtime.enable")
-        request_id += 1
-        await _cdp_call(socket, request_id, "Page.bringToFront")
+        active_call_deadline: float | None = None
+
+        async def call(method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+            nonlocal request_id
+            operation = _cdp_call(socket, request_id, method, params)
+            if active_call_deadline is None:
+                result = await operation
+            else:
+                remaining = active_call_deadline - time.monotonic()
+                if remaining <= 0:
+                    operation.close()
+                    raise PageDeadlineExceeded("本页浏览器调用超过加载窗口")
+                try:
+                    result = await asyncio.wait_for(operation, timeout=remaining)
+                except TimeoutError as exc:
+                    raise PageDeadlineExceeded("本页浏览器调用超过加载窗口") from exc
+            request_id += 1
+            return result
+
+        def heartbeat() -> None:
+            nonlocal last_heartbeat
+            now_mono = time.monotonic()
+            if now_mono - last_heartbeat >= settings.RUN_HEARTBEAT_SECONDS:
+                _require_lease(run_id, worker_id)
+                last_heartbeat = now_mono
+
+        async def observe_page() -> dict[str, Any]:
+            state_result = await call(
+                "Runtime.evaluate",
+                {"expression": _PAGE_STATE_EXPRESSION, "returnByValue": True},
+            )
+            state = _runtime_value(state_result, {})
+            return state if isinstance(state, dict) else {}
+
+        async def extract_cards() -> list[dict[str, Any]]:
+            result = await call(
+                "Runtime.evaluate",
+                {
+                    "expression": f"({adapter.extraction_script})()",
+                    "returnByValue": True,
+                    "awaitPromise": True,
+                },
+            )
+            value = _runtime_value(result, [])
+            return [card for card in value if isinstance(card, dict)] if isinstance(value, list) else []
+
+        heartbeat()
+        await call("Page.enable")
+        heartbeat()
+        await call("Runtime.enable")
+        heartbeat()
+        await call("Page.bringToFront")
+        heartbeat()
 
         # The timeout is per page. Each URL represents a real result page and must get a full
         # render/scroll opportunity; dividing one timeout across all pages made later pages race
         # the marketplaces' virtualized grids.
-        page_window = max(8.0, min(float(settings.COLLECTION_TIMEOUT_SECONDS), 45.0))
+        page_window = max(
+            8.0,
+            min(float(settings.COLLECTION_TIMEOUT_SECONDS), _PAGE_MAX_SECONDS),
+        )
         for page_number in range(1, pages + 1):
             page_url = adapter.search_url(keyword, page=page_number)
             page_raw = RawCardAccumulator(max_cards=max(100, limit * 4))
+            page_started = time.monotonic()
+            page_deadline = page_started + page_window
+            active_call_deadline = page_deadline
+            page_progress = progress_start + int(
+                (page_number - 1) / pages * max(0, progress_end - progress_start)
+            )
+            page_state: dict[str, Any] = {}
+            navigation_confirmed = False
+            new_document_confirmed = False
+            first_results_ready = False
+            completion_reason = ""
+            diagnostic: dict[str, Any] = {
+                "page": page_number,
+                "requested_url": page_url,
+                "final_url": "",
+                "elapsed_ms": 0,
+                "navigation_confirmed": False,
+                "new_document_confirmed": False,
+                "first_results_ready": False,
+                "dom_stable": False,
+                "completion_reason": "",
+                "raw_count": 0,
+                "parsed_count": 0,
+                "ready_state": "",
+                "visibility_state": "",
+            }
+
+            def verification_result() -> tuple[
+                str,
+                str,
+                list[dict[str, Any]],
+                list[MarketplaceListing],
+                list[str],
+                list[dict[str, Any]],
+            ]:
+                diagnostic.update(
+                    {
+                        "final_url": current_url,
+                        "elapsed_ms": round((time.monotonic() - page_started) * 1000),
+                        "navigation_confirmed": navigation_confirmed,
+                        "new_document_confirmed": new_document_confirmed,
+                        "first_results_ready": first_results_ready,
+                        "completion_reason": "verification_required",
+                        "raw_count": len(page_raw),
+                        "parsed_count": len(adapter.parse_cards(page_raw.cards(), limit)),
+                        "ready_state": str(page_state.get("readyState") or ""),
+                        "visibility_state": str(page_state.get("visibilityState") or ""),
+                        "tab_id": str(getattr(socket, "tab_id", "") or ""),
+                    }
+                )
+                page_diagnostics.append(diagnostic)
+                preserve_lock = getattr(socket, "preserve_lock", None)
+                if callable(preserve_lock):
+                    preserve_lock()
+                return (
+                    current_url,
+                    body_text,
+                    all_raw.cards(),
+                    listings,
+                    page_warnings,
+                    page_diagnostics,
+                )
+
             try:
                 _require_lease(
                     run_id,
                     worker_id,
+                    progress=page_progress,
                     current_step=(
                         f"正在采集 {adapter.platform.title()} Malaysia · "
                         f"第 {page_number}/{pages} 页"
                     ),
                 )
-                request_id += 1
-                await _cdp_call(socket, request_id, "Page.navigate", {"url": page_url})
-                request_id += 1
-                await _cdp_call(
-                    socket,
-                    request_id,
+                await call("Page.bringToFront")
+                document_nonce = f"{run_id}:{adapter.platform}:{page_number}:{uuid.uuid4().hex}"
+                await call(
+                    "Runtime.evaluate",
+                    {
+                        "expression": (
+                            "window.__MY_MARKET_RADAR_DOCUMENT_NONCE__ = "
+                            f"{json.dumps(document_nonce)}; true"
+                        ),
+                        "returnByValue": True,
+                    },
+                )
+                await call("Page.navigate", {"url": page_url})
+                await call("Page.bringToFront")
+
+                # Phase 1: do not touch the old DOM until both the requested URL and a visible,
+                # interactive document are confirmed.  This prevents page 1 cards being counted
+                # again as page 2 while a background tab is still switching routes.
+                navigation_budget = min(
+                    _PAGE_NAVIGATION_MAX_SECONDS,
+                    max(3.0, page_window * 0.35),
+                )
+                navigation_deadline = min(page_deadline, page_started + navigation_budget)
+                while time.monotonic() < navigation_deadline:
+                    heartbeat()
+                    await asyncio.sleep(_PAGE_POLL_INTERVAL_SECONDS)
+                    page_state = await observe_page()
+                    current_url = str(page_state.get("href") or "")
+                    body_text = str(page_state.get("bodyText") or "")
+                    visible = page_state.get("visibilityState") == "visible"
+                    ready = page_state.get("readyState") in {"interactive", "complete"}
+                    new_document_confirmed = (
+                        str(page_state.get("collectorDocumentNonce") or "")
+                        != document_nonce
+                    )
+                    if (
+                        visible
+                        and ready
+                        and new_document_confirmed
+                        and _search_page_url_matches(adapter, page_url, current_url)
+                    ):
+                        navigation_confirmed = True
+                        break
+                    if not visible:
+                        await call("Page.bringToFront")
+
+                if not navigation_confirmed:
+                    # A redirect to a real challenge never matches the requested search URL.
+                    # Wait out the navigation budget first so a stale pre-navigation captcha DOM
+                    # cannot immediately trap every resume attempt in needs_verification.
+                    if adapter.is_verification_page(current_url, body_text):
+                        return verification_result()
+                    if current_url and not _search_page_url_matches(adapter, page_url, current_url):
+                        raise RuntimeError(
+                            f"页面跳转未确认，仍停留在 {current_url[:160]}"
+                        )
+                    if not new_document_confirmed:
+                        raise RuntimeError("页面导航未提交新文档")
+                    raise RuntimeError("页面未进入可见且可交互状态")
+
+                await call(
                     "Runtime.evaluate",
                     {"expression": "window.scrollTo(0, 0); true", "returnByValue": True},
                 )
 
-                deadline = time.monotonic() + page_window
-                previous_count = -1
-                stable_rounds = 0
-                at_bottom = False
-                while time.monotonic() < deadline:
-                    now_mono = time.monotonic()
-                    if now_mono - last_heartbeat >= settings.RUN_HEARTBEAT_SECONDS:
-                        _require_lease(run_id, worker_id)
-                        last_heartbeat = now_mono
-
-                    await asyncio.sleep(1.0)
-                    request_id += 1
-                    location = await _cdp_call(socket, request_id, "Runtime.evaluate", {"expression": "location.href", "returnByValue": True})
-                    request_id += 1
-                    body = await _cdp_call(socket, request_id, "Runtime.evaluate", {"expression": "document.body ? document.body.innerText : ''", "returnByValue": True})
-                    current_url = str(_runtime_value(location, page_url) or page_url)
-                    body_text = str(_runtime_value(body, "") or "")
+                # Phase 2: wait for a parseable, fresh first grid.  When changing pages, an
+                # identical card set is treated as the previous virtual list still being mounted
+                # and is never added to this page's accumulator.
+                first_budget = min(
+                    _PAGE_FIRST_RESULTS_MAX_SECONDS,
+                    max(3.0, page_window * 0.40),
+                )
+                first_deadline = min(page_deadline, time.monotonic() + first_budget)
+                stale_grid_seen = False
+                current_cards: list[dict[str, Any]] = []
+                while time.monotonic() < first_deadline:
+                    heartbeat()
+                    await asyncio.sleep(_PAGE_POLL_INTERVAL_SECONDS)
+                    page_state = await observe_page()
+                    current_url = str(page_state.get("href") or current_url)
+                    body_text = str(page_state.get("bodyText") or body_text)
                     if adapter.is_verification_page(current_url, body_text):
-                        return current_url, body_text, [], [], page_warnings
+                        return verification_result()
+                    if not _search_page_url_matches(adapter, page_url, current_url):
+                        continue
+                    if page_state.get("visibilityState") != "visible":
+                        await call("Page.bringToFront")
+                        continue
+                    current_cards = await extract_cards()
+                    current_keys = _raw_keys(current_cards)
+                    if _grid_is_stale(current_keys, previous_page_keys):
+                        stale_grid_seen = True
+                        continue
+                    candidate = RawCardAccumulator(max_cards=max(100, limit * 4))
+                    candidate.add(current_cards)
+                    if adapter.parse_cards(candidate.cards(), limit):
+                        page_raw.add(current_cards)
+                        first_results_ready = True
+                        break
 
-                    request_id += 1
-                    cards = await _cdp_call(
-                        socket,
-                        request_id,
-                        "Runtime.evaluate",
-                        {"expression": f"({adapter.extraction_script})()", "returnByValue": True, "awaitPromise": True},
-                    )
-                    value = _runtime_value(cards, [])
-                    page_raw.add(value if isinstance(value, list) else [])
+                if not first_results_ready:
+                    if stale_grid_seen:
+                        raise RuntimeError("商品网格未从上一页刷新")
+                    raise RuntimeError("页面在限定时间内未挂载可解析商品网格")
 
+                # Phase 3: scroll the virtual list and only finish after either the requested
+                # count or the bottom-of-page DOM has remained unchanged for several polls.
+                previous_signature: tuple[Any, ...] | None = None
+                stable_rounds = 0
+                while True:
+                    heartbeat()
                     usable_count = len(adapter.parse_cards(page_raw.cards(), limit))
-                    if usable_count >= limit:
+                    signature = _card_grid_signature(current_cards, len(page_raw), page_state)
+                    stable_rounds = stable_rounds + 1 if signature == previous_signature else 0
+                    previous_signature = signature
+                    at_bottom = bool(page_state.get("atBottom"))
+                    page_visible = page_state.get("visibilityState") == "visible"
+                    if (
+                        page_visible
+                        and usable_count >= limit
+                        and stable_rounds >= _PAGE_TARGET_STABLE_ROUNDS
+                    ):
+                        completion_reason = "target_count_stable"
                         break
-                    stable_rounds = stable_rounds + 1 if usable_count > 0 and usable_count == previous_count else 0
-                    if stable_rounds >= 3 and at_bottom and usable_count >= min(6, limit):
+                    if (
+                        page_visible
+                        and at_bottom
+                        and usable_count > 0
+                        and stable_rounds >= _PAGE_BOTTOM_STABLE_ROUNDS
+                    ):
+                        completion_reason = "bottom_dom_stable"
                         break
-                    previous_count = usable_count
+                    if time.monotonic() >= page_deadline:
+                        completion_reason = "page_timeout_with_results"
+                        page_warnings.append(
+                            f"第 {page_number} 页加载未完全稳定，已保留 {usable_count} 条结果"
+                        )
+                        break
 
-                    request_id += 1
-                    scroll = await _cdp_call(
-                        socket,
-                        request_id,
-                        "Runtime.evaluate",
-                        {
-                            "expression": (
-                                "(() => { const before = window.scrollY; "
-                                "window.scrollBy(0, Math.max(window.innerHeight, 700)); "
-                                "return { moved: window.scrollY > before + 1, "
-                                "atBottom: window.innerHeight + window.scrollY >= "
-                                "document.documentElement.scrollHeight - 24 }; })()"
-                            ),
-                            "returnByValue": True,
-                        },
-                    )
-                    scroll_state = _runtime_value(scroll, {})
-                    at_bottom = bool(
-                        isinstance(scroll_state, dict) and scroll_state.get("atBottom")
-                    )
+                    if usable_count < limit:
+                        await call(
+                            "Runtime.evaluate",
+                            {
+                                "expression": (
+                                    "(() => { const before = window.scrollY; "
+                                    "window.scrollBy(0, Math.max(window.innerHeight, 700)); "
+                                    "return { moved: window.scrollY > before + 1 }; })()"
+                                ),
+                                "returnByValue": True,
+                            },
+                        )
+                    await asyncio.sleep(_PAGE_POLL_INTERVAL_SECONDS)
+                    page_state = await observe_page()
+                    current_url = str(page_state.get("href") or current_url)
+                    body_text = str(page_state.get("bodyText") or body_text)
+                    if adapter.is_verification_page(current_url, body_text):
+                        return verification_result()
+                    if not _search_page_url_matches(adapter, page_url, current_url):
+                        raise RuntimeError("采集过程中标签页离开了当前搜索页")
+                    if page_state.get("visibilityState") != "visible":
+                        await call("Page.bringToFront")
+                        continue
+                    current_cards = await extract_cards()
+                    page_raw.add(current_cards)
             except WorkerLeaseLost:
                 raise
             except Exception as exc:
-                if not listings:
-                    raise
-                page_warnings.append(f"第 {page_number} 页采集失败：{str(exc)[:180]}")
-                logger.warning(
-                    "%s 第 %s/%s 页采集失败，保留前页结果: %s",
-                    adapter.platform,
-                    page_number,
-                    pages,
-                    exc,
-                )
-                continue
+                if isinstance(exc, PageDeadlineExceeded) and first_results_ready and len(page_raw):
+                    completion_reason = "page_timeout_with_results"
+                    page_warnings.append(
+                        f"第 {page_number} 页加载未完全稳定，已保留 "
+                        f"{len(adapter.parse_cards(page_raw.cards(), limit))} 条结果"
+                    )
+                else:
+                    diagnostic.update(
+                        {
+                            "final_url": current_url,
+                            "elapsed_ms": round((time.monotonic() - page_started) * 1000),
+                            "navigation_confirmed": navigation_confirmed,
+                            "new_document_confirmed": new_document_confirmed,
+                            "first_results_ready": first_results_ready,
+                            "completion_reason": "failed",
+                            "raw_count": len(page_raw),
+                            "parsed_count": len(adapter.parse_cards(page_raw.cards(), limit)),
+                            "ready_state": str(page_state.get("readyState") or ""),
+                            "visibility_state": str(page_state.get("visibilityState") or ""),
+                            "error": str(exc)[:180],
+                        }
+                    )
+                    page_diagnostics.append(diagnostic)
+                    if not listings:
+                        raise PageCollectionError(str(exc), list(page_diagnostics)) from exc
+                    page_warnings.append(f"第 {page_number} 页采集失败：{str(exc)[:180]}")
+                    logger.warning(
+                        "%s 第 %s/%s 页采集失败，保留前页结果: %s",
+                        adapter.platform,
+                        page_number,
+                        pages,
+                        exc,
+                    )
+                    continue
 
             page_cards = page_raw.cards()
             all_raw.add(page_cards)
             page_listings = adapter.parse_cards(page_cards, limit)
+            diagnostic.update(
+                {
+                    "final_url": current_url,
+                    "elapsed_ms": round((time.monotonic() - page_started) * 1000),
+                    "navigation_confirmed": navigation_confirmed,
+                    "new_document_confirmed": new_document_confirmed,
+                    "first_results_ready": first_results_ready,
+                    "dom_stable": completion_reason in {
+                        "target_count_stable",
+                        "bottom_dom_stable",
+                    },
+                    "completion_reason": completion_reason,
+                    "raw_count": len(page_cards),
+                    "parsed_count": len(page_listings),
+                    "ready_state": str(page_state.get("readyState") or ""),
+                    "visibility_state": str(page_state.get("visibilityState") or ""),
+                }
+            )
+            page_diagnostics.append(diagnostic)
             if not page_listings:
                 page_warnings.append(f"第 {page_number} 页没有采集到可解析商品")
                 continue
+            previous_page_keys = _raw_keys(page_cards)
             for listing in page_listings:
                 raw = dict(listing.raw_data or {})
                 local_rank = _positive_int(raw.get("page_position"), listing.search_rank)
@@ -518,8 +971,13 @@ async def _collect_resident_tab(
                 listings_by_id[listing.item_id] = listing
                 listings.append(listing)
 
+            completed_progress = progress_start + int(
+                page_number / pages * max(0, progress_end - progress_start)
+            )
+            _require_lease(run_id, worker_id, progress=completed_progress)
+
     _require_lease(run_id, worker_id)
-    return current_url, body_text, all_raw.cards(), listings, page_warnings
+    return current_url, body_text, all_raw.cards(), listings, page_warnings, page_diagnostics
 
 
 async def _collect(
@@ -546,19 +1004,53 @@ async def _collect(
         progress = 10 + int(index / len(platforms) * 55)
         _require_lease(run_id, worker_id, progress=progress, current_step=f"正在采集 {platform.title()} Malaysia")
         try:
-            current_url, body, raw_cards, listings, page_warnings = await _collect_resident_tab(
+            platform_progress_start = 10 + int(index / len(platforms) * 55)
+            platform_progress_end = 10 + int((index + 1) / len(platforms) * 55)
+            (
+                current_url,
+                body,
+                raw_cards,
+                listings,
+                page_warnings,
+                page_diagnostics,
+            ) = await _collect_resident_tab(
                 adapter,
                 keyword.keyword,
                 keyword.results_limit,
                 keyword.search_pages,
                 run_id,
                 worker_id,
+                progress_start=platform_progress_start,
+                progress_end=platform_progress_end,
             )
             if adapter.is_verification_page(current_url, body):
-                raise VerificationRequired(platform, current_url)
+                if listings:
+                    _persist_platform(run_id, keyword.id, platform, listings, worker_id)
+                raise VerificationRequired(
+                    platform,
+                    current_url,
+                    context={
+                        "platform": platform,
+                        "url": current_url,
+                        "lock_key": _run_lock_key(run_id, platform),
+                        "tab_id": next(
+                            (
+                                str(row.get("tab_id") or "")
+                                for row in reversed(page_diagnostics)
+                                if row.get("tab_id")
+                            ),
+                            "",
+                        ),
+                        "preserved_listing_count": len(listings),
+                        "raw_count": len(raw_cards),
+                        "warnings": list(page_warnings),
+                        "page_diagnostics": list(page_diagnostics),
+                    },
+                )
 
             target_limit = keyword.results_limit * keyword.search_pages
             health = assess_collection_health(raw_cards, listings, target_limit)
+            health["page_diagnostics"] = page_diagnostics
             if page_warnings:
                 health["warnings"] = [*(health.get("warnings") or []), *page_warnings]
                 if health.get("status") == "healthy":
@@ -571,13 +1063,18 @@ async def _collect(
                 platform_errors.append("搜索页有内容，但当前页面结构无法解析；请检查采集适配器")
             elif not listings:
                 platform_errors.append("公开搜索页没有返回可解析商品")
-            elif health["status"] == "unhealthy":
+            elif health["status"] == "unhealthy" or any(
+                "页面结构变化" in warning for warning in (health.get("warnings") or [])
+            ):
                 platform_errors.append("采集器健康度异常，页面结构可能已经变化")
             if platform_errors:
                 errors[platform] = "；".join(platform_errors)
             results[platform] = listings
             _persist_platform(run_id, keyword.id, platform, listings, worker_id)
-            await asyncio.sleep(1.0)
+            # Extension 1.0.2 stops polling shortly after the last debugger session detaches.
+            # Queue the next platform attach immediately while its worker is still awake.
+            if settings.BROWSER_MODE != "extension":
+                await asyncio.sleep(1.0)
         except VerificationRequired:
             raise
         except WorkerLeaseLost:
@@ -593,6 +1090,9 @@ async def _collect(
             health["status"] = "error"
             health["health_score"] = 0.0
             health["warnings"] = [str(exc)[:300]]
+            health["page_diagnostics"] = list(
+                getattr(exc, "page_diagnostics", []) or []
+            )
             platform_health[platform] = health
             errors[platform] = str(exc)[:500]
     return results, errors, platform_health
@@ -608,29 +1108,32 @@ def _persist_results(db: Session, run: AnalysisRun, keyword: TrackedKeyword, col
 def _mark_verification(run_id: int, exc: VerificationRequired, worker_id: str) -> None:
     db = SessionLocal()
     try:
-        updated = (
+        run = (
             db.query(AnalysisRun)
             .filter(
                 AnalysisRun.id == run_id,
                 AnalysisRun.worker_id == worker_id,
                 AnalysisRun.status == "running",
             )
-            .update(
-                {
-                    AnalysisRun.status: "needs_verification",
-                    AnalysisRun.current_step: f"{exc.platform.title()} 需要人工验证",
-                    AnalysisRun.verification_platform: exc.platform,
-                    AnalysisRun.error_message: f"{exc.platform.title()} 触发了人工验证。请在你的 Google Chrome 完成验证，保持该标签页打开，然后点击继续。",
-                    AnalysisRun.worker_id: None,
-                    AnalysisRun.heartbeat_at: None,
-                },
-                synchronize_session=False,
-            )
+            .first()
         )
-        if updated:
-            db.commit()
-        else:
+        if not run:
             db.rollback()
+            return
+        run.status = "needs_verification"
+        run.current_step = f"{exc.platform.title()} 需要人工验证"
+        run.verification_platform = exc.platform
+        run.error_message = (
+            f"{exc.platform.title()} 触发了人工验证。请在你的 Google Chrome "
+            "完成验证，保持该标签页打开，然后点击继续。"
+        )
+        run.worker_id = None
+        run.heartbeat_at = None
+        run.analysis = {
+            **(run.analysis or {}),
+            "verification_context": dict(exc.context or {}),
+        }
+        db.commit()
     finally:
         db.close()
 
@@ -698,8 +1201,12 @@ def execute_run_sync(run_id: int) -> None:
             return
         collection_request = _collection_request(run, keyword)
         run.status = "running"
-        run.progress = 5
-        run.current_step = "准备项目 Chrome"
+        run.progress = max(int(run.progress or 0), 5)
+        run.current_step = (
+            "连接你已登录的 Google Chrome"
+            if settings.BROWSER_MODE == "extension"
+            else "准备采集浏览器"
+        )
         run.started_at = _utcnow()
         run.completed_at = None
         run.error_message = None
@@ -779,7 +1286,11 @@ def execute_run_sync(run_id: int) -> None:
             run.current_step = "分析完成"
         else:
             run.status = "partial"
-            run.current_step = "部分平台无结果"
+            run.current_step = (
+                "分析完成 · 部分数据不完整"
+                if expected == successful
+                else "部分平台无结果"
+            )
         run.progress = 100
         run.opportunity_score = analysis["opportunity_score"]
         run.verdict = analysis["verdict"]
@@ -829,6 +1340,21 @@ def open_verification_browser(run_id: int) -> str:
             raise ValueError("关键词不存在")
         platform = run.verification_platform if run.verification_platform in ADAPTERS else "shopee"
         url = ADAPTERS[platform].search_url(keyword.keyword)
+        verification_context = (
+            (run.analysis or {}).get("verification_context")
+            if isinstance(run.analysis, dict)
+            else {}
+        )
+        verification_context = (
+            verification_context
+            if isinstance(verification_context, dict)
+            and verification_context.get("platform") == platform
+            else {}
+        )
+        lock_key = str(
+            verification_context.get("lock_key") or _run_lock_key(run.id, platform)
+        )
+        locked_tab_id = str(verification_context.get("tab_id") or "")
     finally:
         db.close()
 
@@ -837,9 +1363,17 @@ def open_verification_browser(run_id: int) -> str:
 
     if not browser_ready():
         ensure_browser([url])
+    exact_tab = find_platform_tab_by_id(platform, locked_tab_id)
+    if exact_tab and activate_tab(str(exact_tab.get("id") or "")):
+        return str(exact_tab.get("url") or url)
+    locked_tab = activate_locked_platform_tab(platform, lock_key)
+    if locked_tab:
+        return str(locked_tab.get("url") or url)
     tab = find_platform_tab(platform)
     if not tab:
         tab = ensure_platform_tab(platform, url)
-    if not activate_platform_tab(platform):
-        raise RuntimeError("项目 Chrome 已启动，但无法激活验证标签页")
+    if not activate_tab(str(tab.get("id") or "")):
+        if settings.BROWSER_MODE == "extension":
+            raise RuntimeError("无法激活你已登录的 Google Chrome 验证标签页")
+        raise RuntimeError("采集浏览器已启动，但无法激活验证标签页")
     return str(tab.get("url") or url)

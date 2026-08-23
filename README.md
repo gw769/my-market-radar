@@ -2,13 +2,16 @@
 
 面向马来西亚市场的 Shopee × Lazada 公开搜索结果分析工具。
 
-当前版本推荐直接运行在 **Windows / macOS / Linux 桌面环境**，使用项目自己的可见 Chrome / Chromium 完成采集和人工验证码处理。Docker 相关文件仍保留，但不再作为推荐运行方式。
+当前正式路径是在本机 / systemd 运行后端，并显式使用 `BROWSER_MODE=extension`。托管的 **MY Market Radar Browser Bridge** 会复用用户自己已经登录 Shopee / Lazada 的普通 Google Chrome；项目不使用 Playwright，也不会另外启动项目专用 Chromium、独立 profile 或 headless 浏览器。
+
+Docker 和独立 CDP profile 相关文件仍保留作开发兼容，但都不是当前部署路径。
 
 项目目标不是预测利润或复制平台后台，而是把公开搜索结果整理成一套可解释、可复查的市场验证流程。
 
 ## 主要功能
 
 - Shopee Malaysia / Lazada Malaysia 公开搜索结果采集
+- 复用已登录 Chrome 标签页，默认在同一标签页依次采集搜索结果前 3 页
 - 关键词分析
 - preset-based 机会发现
 - 一键深扫 20 / 40 条
@@ -38,13 +41,14 @@
 
 ---
 
-# 本机启动（推荐）
+# 当前运行方式（本机 / systemd，推荐）
 
 要求：
 
 - Python 3.11+
 - Node.js 18+
-- Google Chrome 或 Chromium
+- 用户平时使用、并已登录 Shopee / Lazada 的 Google Chrome
+- 已由部署环境托管安装的 MY Market Radar Browser Bridge
 
 第一次安装：
 
@@ -65,7 +69,13 @@ npm ci
 npm run build
 ```
 
-然后从项目根目录启动：
+Extension 路径必须在进程环境或根目录 `.env` 中明确配置：
+
+```text
+BROWSER_MODE=extension
+```
+
+然后可以从项目根目录使用现有本机 launcher：
 
 ```bash
 python start.py
@@ -80,10 +90,12 @@ http://localhost:8011
 `start.py` 会：
 
 - 只监听 `127.0.0.1:8011`
-- 显式使用项目专用 Chrome / Chromium
-- 使用独立浏览器 profile：`backend/data/browser-profile`
-- 使用 CDP 端口 `9231`
-- 保持浏览器会话，方便 Shopee / Lazada 人工验证
+- 继承 `.env` / 进程环境中的 `BROWSER_MODE`
+- 在 extension 模式下连接用户自己的普通 Google Chrome
+- 通过 Browser Bridge 复用用户现有登录态和标签页
+- 不启动或关闭用户的 Chrome
+
+当前服务器使用仓库中的 `deploy/my-market-radar.service`：后端由 systemd 运行在 `127.0.0.1:8011`，service 已显式设置 `BROWSER_MODE=extension`。Browser Bridge 由 `deploy/chrome-policy.json` 中的 managed policy 安装到用户的 Google Chrome；后端 service 本身不启动浏览器。
 
 如果项目根目录没有 `.env`，并且数据库是全新的，本机 launcher 首次体验会临时提供：
 
@@ -110,51 +122,53 @@ backend/venv
 系统 Python
 ```
 
+在 `BROWSER_MODE=extension` 下，这些 launcher 只负责启动 / 停止应用进程。普通 Google Chrome 由用户自行保持打开，`stop.bat` 不应关闭它。
+
 `stop.bat` 采用保守停止策略：
 
 - 只停止确认属于 MY Market Radar 的 backend
 - 不按端口无条件杀进程
 - 不自动杀其他项目常用的 3000 端口
-- 9231 只用于项目专用 Chrome
 - 不会用窗口标题通配符误杀普通 Chrome
 
 详细说明见 `docs/WINDOWS_LAUNCHERS.md`。
 
 ---
 
-# 为什么现在推荐本机而不是 Docker
+# 为什么当前使用本机 / systemd，而不是 Docker
 
-普通公开搜索页在 headless Chromium 中可以采集，但 Shopee / Lazada 一旦触发验证码或风控页，就需要人工处理。
+Shopee / Lazada 采集可能触发验证码或风控页，这一步需要用户在已登录的可见 Chrome 中人工处理。
 
-本机模式下：
+Extension 模式下：
 
 1. run 进入 `needs_verification`
 2. 页面点击“验证”
-3. 项目 Chrome 激活真正的 challenge / captcha / security tab
+3. Browser Bridge 激活本次采集锁定的平台 challenge / captcha / security tab
 4. 用户手动完成验证
-5. 保持 Chrome 窗口打开
+5. 保持自己的 Google Chrome 和该标签页打开
 6. 点击“继续”
 
 项目不会绕过验证码，也不做浏览器指纹伪造。
 
-纯 Docker headless 环境没有可见桌面，因此无法完成这一步。为了让采集和验证码恢复保持同一个浏览器 profile、同一个 CDP 会话和最简单的运维路径，当前推荐直接使用本机桌面模式。
+当前架构需要复用用户自己 Chrome 里的真实登录态和可见验证页面，因此后端使用本机 / systemd 服务，浏览器使用用户日常的 Google Chrome。Bridge 只在本机 `127.0.0.1:9232` 与后端交换有界命令。
 
-Dockerfile、`docker-compose.simple.yml`、`start_docker.bat` 等文件暂时保留，主要用于无验证码的 headless 场景或后续部署实验，不作为当前首选。
+Dockerfile、`docker-compose.simple.yml`、`start_docker.bat` 等文件只是历史兼容 / 实验资产。它们不共享用户普通 Chrome 的登录态，也不是当前正式部署或推荐排障路径。
 
 ---
 
 # 浏览器行为
 
-项目通过 Chrome DevTools Protocol 读取公开页面。
+当前 `BROWSER_MODE=extension` 下，后端通过 managed Browser Bridge 向用户自己的 Chrome 发送必要的标签页与 DevTools 命令；不使用 Playwright，也不直接连接 `9231`。
 
-正常采集优先选择：
+正常采集流程：
 
-```text
-Shopee /search
-Lazada /catalog
-```
+1. 按真实 hostname 查找 `shopee.com.my` / `lazada.com.my` 标签页。
+2. 优先复用 Shopee `/search` 或 Lazada `/catalog`，并把它锁定为本次平台采集 tab。
+3. 如果只有平台其他页面，则复用它；只有完全没有匹配 tab 时才新建。
+4. 在这个同一 tab 里直接导航第 1、2、3 页搜索 URL，不为每页创建新窗口。
+5. 每一页都有独立的加载 / 滚动时间窗口；确认 URL 已切换、文档可见且结果出现后才解析，避免上一页 DOM 被误当作下一页。
 
-人工验证优先选择：
+人工验证会优先激活本次采集锁定的 tab；兼容旧 Bridge 时才按下面的验证特征选择：
 
 ```text
 captcha
@@ -165,7 +179,13 @@ Shopee xiapibuy
 Lazada acs-m security host
 ```
 
-平台标签页按真实 hostname 判断，不会因为查询参数中出现平台域名而误选错误 tab。
+平台标签页按真实 hostname 判断，不会因为查询参数中出现平台域名而误选错误 tab。验证码只允许用户手动完成，程序不会绕过或伪造验证。
+
+## 可选开发 fallback：独立 CDP profile
+
+仓库仍保留 `BROWSER_MODE=cdp` 兼容路径：它会使用 `backend/data/browser-profile` 和本地 CDP 端口 `9231` 启动项目专用 Chrome / Chromium。该模式适合隔离调试，不复用用户普通 Chrome 的登录态，也不是当前 systemd 正式路径。
+
+后端配置的兼容默认值仍可能落到 `cdp`，所以正式 / 日常运行不能省略 `BROWSER_MODE=extension`。不要同时启动 legacy `market-verification-browser.service` 与 extension 正式路径。
 
 详细说明见 `docs/BROWSER_TABS.md`。
 

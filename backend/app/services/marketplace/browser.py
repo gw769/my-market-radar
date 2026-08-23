@@ -20,6 +20,7 @@ from app.services.marketplace.extension_bridge import (
 
 settings = get_settings()
 EXTENSION_ACTION_TIMEOUT_SECONDS = 40
+LOCKED_TAB_ACTION_TIMEOUT_SECONDS = 5
 
 
 class BrowserLaunchError(RuntimeError):
@@ -286,6 +287,15 @@ def find_platform_tab(platform: str, prefer_verification: bool = True) -> dict[s
     )
 
 
+def find_platform_tab_by_id(platform: str, tab_id: str) -> dict[str, Any] | None:
+    if not tab_id:
+        return None
+    return next(
+        (tab for tab in _platform_tabs(platform) if str(tab.get("id") or "") == str(tab_id)),
+        None,
+    )
+
+
 def new_tab(url: str) -> dict[str, Any] | None:
     ensure_browser()
     if settings.BROWSER_MODE == "extension":
@@ -345,8 +355,43 @@ def activate_platform_tab(platform: str, prefer_verification: bool = True) -> bo
     return bool(tab and activate_tab(str(tab.get("id") or "")))
 
 
+def activate_locked_platform_tab(platform: str, lock_key: str) -> dict[str, Any] | None:
+    """Activate the exact run-scoped tab pinned by extension 1.0.7."""
+    if settings.BROWSER_MODE != "extension":
+        return None
+    try:
+        payload = extension_request(
+            "activate_locked_platform",
+            timeout=LOCKED_TAB_ACTION_TIMEOUT_SECONDS,
+            platform=platform,
+            lock_key=lock_key,
+        )
+        return payload if isinstance(payload, dict) else None
+    except ExtensionBridgeError:
+        # Older extensions do not know this action. Callers retain the deterministic
+        # hostname/verification-priority fallback until Chrome installs 1.0.7.
+        return None
+
+
+def release_platform_tab_lock(platform: str, lock_key: str, lock_owner: str) -> bool:
+    if settings.BROWSER_MODE != "extension":
+        return True
+    try:
+        return bool(
+            extension_request(
+                "release_platform_lock",
+                timeout=LOCKED_TAB_ACTION_TIMEOUT_SECONDS,
+                platform=platform,
+                lock_key=lock_key,
+                lock_owner=lock_owner,
+            )
+        )
+    except ExtensionBridgeError:
+        return False
+
+
 def open_url(url: str) -> None:
-    """Open an application URL in the same dedicated Chrome used by collection."""
+    """Open an application URL in the Chrome connection currently used for collection."""
     ensure_browser([url])
     for tab in list_tabs():
         if str(tab.get("url", "")).rstrip("/") == url.rstrip("/"):

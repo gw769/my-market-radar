@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Clock3, Monitor, Pause, Play, RefreshCw, Trash2 } from "lucide-react";
+import { AlertTriangle, Clock3, LoaderCircle, Monitor, Pause, Play, RefreshCw, Trash2 } from "lucide-react";
 import { apiDelete, apiGet, apiPatch, apiPost } from "@/lib/api";
 import StatusBadge from "@/components/StatusBadge";
 import type { Keyword } from "@/types";
@@ -62,15 +62,22 @@ export default function Tracking() {
         const deleteBlocked = Boolean(run && DELETE_BLOCKED_RUNS.has(run.status));
         const resultRun = run && RESULT_RUNS.has(run.status) ? run : item.latest_result_run;
         const showingOlderScore = Boolean(run && resultRun && run.id !== resultRun.id);
+        const progress = Math.max(0, Math.min(100, run?.progress ?? 0));
+        const platformErrors = Object.entries((run?.analysis?.platform_errors || {}) as Record<string, string>);
+        const isPageLoading = Boolean(run?.status === "running" && /(chrome|正在采集|第\s*\d+\s*\/\s*\d+\s*页)/i.test(run.current_step || ""));
         return <article key={item.id} className={`tracking-card ${run?.id === highlighted ? "highlight" : ""}`}>
           <div className="tracking-main">
             <div className="keyword-monogram">{item.keyword.slice(0, 2).toUpperCase()}</div>
             <div className="tracking-keyword-copy"><h3>{item.keyword}</h3><p>{item.platforms.join(" + ")}</p><div className="tracking-scan-meta"><span><b>前 {searchPages} 页</b>真实访问</span><span><b>{item.results_limit} 条</b> / 页</span><span><b>最多 {maxPerPlatform} 条</b> / 平台</span><span>每日 <b>{item.daily_time}</b></span></div></div>
           </div>
           <div className="tracking-status">
-            {run && <StatusBadge status={run.status} />}
-            <div className="progress-track"><i style={{ width: `${run?.progress ?? 0}%` }} /></div>
-            <small>{run?.current_step || "尚未运行"}</small>
+            <div className="tracking-status-head">
+              {run && <StatusBadge status={run.status} />}
+              <b>{run ? `${progress}%` : "—"}</b>
+            </div>
+            <div className="tracking-current-step"><span>当前步骤</span><strong>{run?.current_step || "尚未运行"}</strong></div>
+            <div className="progress-track" role="progressbar" aria-label={`${item.keyword} 采集进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><i style={{ width: `${progress}%` }} /></div>
+            {run?.status === "running" && <small className={`scan-wait-hint ${isPageLoading ? "page-loading" : "result-processing"}`}><LoaderCircle /> {isPageLoading ? "正在等待页面加载稳定，不是卡住" : "正在处理采集结果"}</small>}
           </div>
           <div className="tracking-score">
             <strong>{resultRun?.opportunity_score ?? "—"}</strong>
@@ -78,10 +85,10 @@ export default function Tracking() {
           </div>
           <div className="tracking-actions">
             {run?.status === "needs_verification" && <>
-              <button title="打开验证浏览器" onClick={() => action(() => apiPost(`/runs/${run.id}/verification-browser`), "验证浏览器已打开；验证完成后保持窗口打开。") }><Monitor /><span>验证</span></button>
-              <button title="验证完成后继续采集" onClick={() => queuedAction(() => apiPost(`/runs/${run.id}/resume`), "正在从验证浏览器继续采集") }><Play /><span>继续</span></button>
+              <button className="verification-open" title="打开验证标签页" onClick={() => action(() => apiPost(`/runs/${run.id}/verification-browser`), "验证标签页已打开；完成验证后保持该标签页打开。") }><Monitor /><span>打开验证</span></button>
+              <button className="verification-resume" title="验证完成后继续采集" onClick={() => queuedAction(() => apiPost(`/runs/${run.id}/resume`), "正在从已验证的标签页继续采集") }><Play /><span>验证后继续</span></button>
             </>}
-            {(run?.status === "failed" || run?.status === "partial") && <button title="创建新的重试任务" onClick={() => queuedAction(() => apiPost(`/runs/${run.id}/resume`), "已创建新的重试任务") }><Play /><span>重试</span></button>}
+            {(run?.status === "failed" || run?.status === "partial") && <button className="retry-action" title="创建新的重试任务" onClick={() => queuedAction(() => apiPost(`/runs/${run.id}/resume`), "已创建新的重试任务") }><Play /><span>重试</span></button>}
             <button
               title={active ? "当前任务尚未结束" : "立即更新"}
               disabled={active}
@@ -95,7 +102,9 @@ export default function Tracking() {
               onClick={() => action(() => apiDelete(`/keywords/${item.id}`), "已删除")}
             ><Trash2 /><span>删除</span></button>
           </div>
-          {run?.error_message && <div className="run-error">{run.error_message}</div>}
+          {platformErrors.length > 0 ? <div className="run-issues">
+            {platformErrors.map(([platform, detail]) => <article key={platform}><AlertTriangle /><div><strong>{platform === "shopee" ? "Shopee" : platform === "lazada" ? "Lazada" : platform}</strong><p>{detail}</p></div></article>)}
+          </div> : run?.error_message && <div className="run-error"><AlertTriangle /> <span>{run.error_message}</span></div>}
         </article>;
       })}
     </div>

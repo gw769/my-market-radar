@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from app.services.marketplace import browser
+from app.services.marketplace.extension_bridge import ExtensionBridgeError
 
 
 def tab(tab_id: str, url: str, tab_type: str = "page") -> dict:
@@ -112,6 +113,68 @@ class BrowserTabSelectionTests(unittest.TestCase):
             selected_b = browser.find_platform_tab("shopee")
         self.assertEqual(selected_a["id"], "challenge-z")
         self.assertEqual(selected_b["id"], "challenge-z")
+
+    def test_platform_tab_id_lookup_still_validates_real_hostname(self):
+        tabs = [
+            tab("wanted", "https://shopee.xiapibuy.com/verify?run=1"),
+            tab("wrong-host", "https://example.test/verify"),
+        ]
+        with patch.object(browser, "list_tabs", return_value=tabs):
+            self.assertEqual(
+                browser.find_platform_tab_by_id("shopee", "wanted")["id"],
+                "wanted",
+            )
+            self.assertIsNone(
+                browser.find_platform_tab_by_id("shopee", "wrong-host")
+            )
+
+    def test_extension_lock_selects_the_current_run_tab_among_multiple_challenges(self):
+        locked = tab("challenge-current", "https://shopee.xiapibuy.com/verify?run=current")
+        with patch.object(browser.settings, "BROWSER_MODE", "extension"), patch.object(
+            browser,
+            "extension_request",
+            return_value=locked,
+        ) as request:
+            selected = browser.activate_locked_platform_tab("shopee", "run:17:shopee")
+
+        self.assertEqual(selected, locked)
+        request.assert_called_once_with(
+            "activate_locked_platform",
+            timeout=browser.LOCKED_TAB_ACTION_TIMEOUT_SECONDS,
+            platform="shopee",
+            lock_key="run:17:shopee",
+        )
+
+    def test_old_extension_unknown_lock_action_falls_back_cleanly(self):
+        with patch.object(browser.settings, "BROWSER_MODE", "extension"), patch.object(
+            browser,
+            "extension_request",
+            side_effect=ExtensionBridgeError("Unknown bridge action"),
+        ):
+            self.assertIsNone(
+                browser.activate_locked_platform_tab("lazada", "run:18:lazada")
+            )
+
+    def test_release_run_lock_is_bounded_and_old_extension_compatible(self):
+        with patch.object(browser.settings, "BROWSER_MODE", "extension"), patch.object(
+            browser,
+            "extension_request",
+            return_value=True,
+        ) as request:
+            self.assertTrue(
+                browser.release_platform_tab_lock(
+                    "shopee",
+                    "run:19:shopee",
+                    "owner-19",
+                )
+            )
+        request.assert_called_once_with(
+            "release_platform_lock",
+            timeout=browser.LOCKED_TAB_ACTION_TIMEOUT_SECONDS,
+            platform="shopee",
+            lock_key="run:19:shopee",
+            lock_owner="owner-19",
+        )
 
 
 if __name__ == "__main__":

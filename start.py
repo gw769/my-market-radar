@@ -45,8 +45,8 @@ def open_when_ready() -> None:
                 from app.services.marketplace.browser import open_url
                 open_url(url)
             except Exception as exc:
-                print(f"无法自动打开项目 Chrome：{exc}")
-                print(f"请安装/配置 Google Chrome 后手动访问：{url}")
+                print(f"无法在已登录的 Google Chrome 中自动打开应用页面：{exc}")
+                print(f"请保持 Google Chrome 打开并手动访问：{url}")
             return
         time.sleep(0.5)
 

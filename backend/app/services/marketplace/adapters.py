@@ -9,10 +9,11 @@ from app.services.marketplace.query_localization import marketplace_search_term
 
 
 class VerificationRequired(RuntimeError):
-    def __init__(self, platform: str, url: str):
+    def __init__(self, platform: str, url: str, context: dict[str, Any] | None = None):
         super().__init__(f"{platform} 需要人工验证")
         self.platform = platform
         self.url = url
+        self.context = context or {}
 
 
 @dataclass(slots=True)

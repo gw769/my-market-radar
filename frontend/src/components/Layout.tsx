@@ -23,7 +23,7 @@ export default function Layout() {
       <aside className="sidebar">
         <div className="brand-block"><div className="brand-mark"><Radar size={22} /></div><div><strong>MY Market Radar</strong><span>Shopee × Lazada</span></div></div>
         <div className="market-chip"><span /> MALAYSIA · MYR</div>
-        <nav>{NAV.map(({ to, label, mobileLabel, Icon }) => <NavLink key={to} to={to} className={({ isActive }) => isActive ? "nav-item active" : "nav-item"}><Icon size={18} /><span className="nav-label-full">{label}</span><span className="nav-label-mobile">{mobileLabel}</span></NavLink>)}</nav>
+        <nav>{NAV.map(({ to, label, mobileLabel, Icon }) => <NavLink key={to} to={to} aria-label={label} title={label} className={({ isActive }) => isActive ? "nav-item active" : "nav-item"}><Icon size={18} /><span className="nav-label-full">{label}</span><span className="nav-label-mobile">{mobileLabel}</span></NavLink>)}</nav>
         <div className="sidebar-foot"><div className="pulse-line"><span /> 按关键词计划自动更新</div><small>公开数据情报 · Malaysia UTC+8</small></div>
       </aside>
       <div className="main-column">

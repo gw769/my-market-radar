@@ -67,7 +67,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertTrue(session.closed)
         for run in (running, pending):
             self.assertEqual(run.status, "pending")
-            self.assertEqual(run.progress, 0)
+            self.assertEqual(run.progress, 64)
             self.assertEqual(run.current_step, "服务重启后等待恢复采集")
             self.assertIsNone(run.started_at)
             self.assertIsNone(run.completed_at)
@@ -98,6 +98,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(queued, 1)
         self.assertTrue(session.committed)
         self.assertEqual(stale.status, "pending")
+        self.assertEqual(stale.progress, 64)
         self.assertEqual(stale.current_step, "采集 worker 心跳超时，启动独立恢复 worker")
         self.assertIsNone(stale.worker_id)
         self.assertIsNone(stale.heartbeat_at)
