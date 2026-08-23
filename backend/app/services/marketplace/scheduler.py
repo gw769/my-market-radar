@@ -13,8 +13,15 @@ _stop = threading.Event()
 _thread: threading.Thread | None = None
 
 
+def _aware_utc(value: datetime | None = None) -> datetime:
+    value = value or datetime.now(timezone.utc)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def next_run_utc(daily_time: str, timezone_name: str, now_utc: datetime | None = None) -> datetime:
-    now_utc = now_utc or datetime.now(timezone.utc)
+    now_utc = _aware_utc(now_utc)
     zone = ZoneInfo(timezone_name)
     local = now_utc.astimezone(zone)
     hour, minute = (int(part) for part in daily_time.split(":"))
@@ -24,26 +31,58 @@ def next_run_utc(daily_time: str, timezone_name: str, now_utc: datetime | None =
     return candidate.astimezone(timezone.utc).replace(tzinfo=None)
 
 
+def initial_next_run_utc(
+    daily_time: str,
+    timezone_name: str,
+    last_run_at: datetime | None,
+    now_utc: datetime | None = None,
+) -> datetime:
+    """Initialize migrated/missing schedules while preserving one same-day catch-up run."""
+    now_utc = _aware_utc(now_utc)
+    zone = ZoneInfo(timezone_name)
+    local_now = now_utc.astimezone(zone)
+    hour, minute = (int(part) for part in daily_time.split(":"))
+    due_today = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    last_local_date = (
+        _aware_utc(last_run_at).astimezone(zone).date()
+        if last_run_at is not None
+        else None
+    )
+    if local_now >= due_today and last_local_date != local_now.date():
+        return now_utc.replace(tzinfo=None)
+    return next_run_utc(daily_time, timezone_name, now_utc)
+
+
 def _run_due_jobs() -> None:
     db = SessionLocal()
     try:
-        now = datetime.now(timezone.utc)
-        keywords = db.query(TrackedKeyword).filter(TrackedKeyword.tracking_enabled.is_(True)).all()
+        now_utc = _aware_utc()
+        now_naive = now_utc.replace(tzinfo=None)
+        keywords = (
+            db.query(TrackedKeyword)
+            .filter(TrackedKeyword.tracking_enabled.is_(True))
+            .all()
+        )
         for keyword in keywords:
-            zone = ZoneInfo(keyword.timezone)
-            local_now = now.astimezone(zone)
-            hour, minute = (int(part) for part in keyword.daily_time.split(":"))
-            due_today = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            last_local_date = (
-                keyword.last_run_at.replace(tzinfo=timezone.utc).astimezone(zone).date()
-                if keyword.last_run_at
-                else None
-            )
-            if local_now >= due_today and last_local_date != local_now.date():
-                run = create_run(db, keyword, trigger="scheduled")
+            if keyword.next_run_at is None:
+                keyword.next_run_at = initial_next_run_utc(
+                    keyword.daily_time,
+                    keyword.timezone,
+                    keyword.last_run_at,
+                    now_utc,
+                )
+
+            if keyword.next_run_at > now_naive:
+                continue
+
+            run = create_run(db, keyword, trigger="scheduled")
+            # Advance the durable schedule before touching the in-memory queue. This prevents
+            # needs_verification/running jobs from being retried every scheduler tick.
+            keyword.next_run_at = next_run_utc(keyword.daily_time, keyword.timezone, now_utc)
+            db.commit()
+
+            if run.status == "pending":
                 submit_run(run.id)
-            keyword.next_run_at = next_run_utc(keyword.daily_time, keyword.timezone, now)
-        db.commit()
     finally:
         db.close()
 
