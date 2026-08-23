@@ -255,14 +255,38 @@ def report(run_id: int, db: Session = Depends(get_db), current_user: User = Depe
 def dashboard(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     keywords = db.query(TrackedKeyword).filter(TrackedKeyword.user_id == current_user.id).all()
     keyword_ids = [item.id for item in keywords]
-    runs = db.query(AnalysisRun).filter(AnalysisRun.keyword_id.in_(keyword_ids)).order_by(AnalysisRun.id.desc()).limit(50).all() if keyword_ids else []
-    completed_ids = [run.id for run in runs if run.status in RESULT_STATUSES]
-    platform_counts = dict(db.query(ListingSnapshot.platform, func.count(ListingSnapshot.id)).filter(ListingSnapshot.run_id.in_(completed_ids)).group_by(ListingSnapshot.platform).all()) if completed_ids else {}
+    if not keyword_ids:
+        return {"success": True, "data": {
+            "keyword_count": 0, "tracking_count": 0, "needs_verification": 0,
+            "completed_runs": 0, "platform_counts": {}, "latest_runs": [], "score_history": [],
+        }}
+
+    run_base = db.query(AnalysisRun).filter(AnalysisRun.keyword_id.in_(keyword_ids))
+    completed_runs = run_base.filter(AnalysisRun.status.in_(RESULT_STATUSES)).count()
+    needs_verification = run_base.filter(AnalysisRun.status == "needs_verification").count()
+
+    recent_runs = run_base.order_by(AnalysisRun.id.desc()).limit(50).all()
+    latest_runs = recent_runs[:8]
+    score_history = [
+        {"run_id": run.id, "keyword": run.tracked_keyword.keyword, "score": run.opportunity_score, "created_at": _iso(run.created_at)}
+        for run in reversed(recent_runs)
+        if run.opportunity_score is not None
+    ][-30:]
+
+    stable_run_ids = [result.id for keyword in keywords if (result := _latest_result(db, keyword.id))]
+    platform_counts = dict(
+        db.query(ListingSnapshot.platform, func.count(ListingSnapshot.id))
+        .filter(ListingSnapshot.run_id.in_(stable_run_ids))
+        .group_by(ListingSnapshot.platform)
+        .all()
+    ) if stable_run_ids else {}
+
     return {"success": True, "data": {
-        "keyword_count": len(keywords), "tracking_count": sum(bool(x.tracking_enabled) for x in keywords),
-        "needs_verification": sum(x.status == "needs_verification" for x in runs),
-        "completed_runs": sum(x.status in RESULT_STATUSES for x in runs),
+        "keyword_count": len(keywords),
+        "tracking_count": sum(bool(item.tracking_enabled) for item in keywords),
+        "needs_verification": needs_verification,
+        "completed_runs": completed_runs,
         "platform_counts": platform_counts,
-        "latest_runs": [_run_payload(run) for run in runs[:8]],
-        "score_history": [{"run_id": run.id, "keyword": run.tracked_keyword.keyword, "score": run.opportunity_score, "created_at": _iso(run.created_at)} for run in reversed(runs) if run.opportunity_score is not None][-30:],
+        "latest_runs": [_run_payload(run) for run in latest_runs],
+        "score_history": score_history,
     }}
