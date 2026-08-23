@@ -50,15 +50,16 @@ class FakeSession:
 
 
 class RecoveryTests(unittest.TestCase):
-    def test_all_recoverable_runs_are_reset_and_requeued(self):
+    def test_startup_recovery_uses_normal_serial_queue(self):
         running = FakeRun(10, "running")
         pending = FakeRun(11, "pending")
         session = FakeSession([running, pending])
-        submit = Mock(side_effect=[True, True])
+        normal_submit = Mock(side_effect=[True, True])
+        recovery_submit = Mock()
 
         with patch("app.services.marketplace.recovery.SessionLocal", return_value=session), patch(
-            "app.services.marketplace.recovery.submit_run", submit
-        ):
+            "app.services.marketplace.recovery.submit_run", normal_submit
+        ), patch("app.services.marketplace.recovery.submit_recovery_run", recovery_submit):
             queued = recover_interrupted_runs()
 
         self.assertEqual(queued, 2)
@@ -74,45 +75,52 @@ class RecoveryTests(unittest.TestCase):
             self.assertIsNone(run.verification_platform)
             self.assertIsNone(run.worker_id)
             self.assertIsNone(run.heartbeat_at)
-        self.assertEqual([call.args[0] for call in submit.call_args_list], [10, 11])
+        self.assertEqual([call.args[0] for call in normal_submit.call_args_list], [10, 11])
+        recovery_submit.assert_not_called()
 
-    def test_stale_running_worker_is_recovered_but_recent_worker_is_left_alone(self):
+    def test_stale_running_worker_uses_independent_recovery_executor(self):
         stale = FakeRun(21, "running")
         recent = FakeRun(22, "running")
         now = datetime(2026, 8, 23, 5, 0, 0)
         stale.heartbeat_at = now - timedelta(minutes=10)
         recent.heartbeat_at = now - timedelta(seconds=30)
         session = FakeSession([stale, recent])
-        submit = Mock(return_value=True)
+        normal_submit = Mock()
+        recovery_submit = Mock(return_value=True)
 
         with patch("app.services.marketplace.recovery.SessionLocal", return_value=session), patch(
-            "app.services.marketplace.recovery.submit_run", submit
+            "app.services.marketplace.recovery.submit_run", normal_submit
+        ), patch(
+            "app.services.marketplace.recovery.submit_recovery_run", recovery_submit
         ), patch("app.services.marketplace.recovery.settings.RUN_STALE_AFTER_SECONDS", 240):
             queued = recover_stale_runs(now=now)
 
         self.assertEqual(queued, 1)
         self.assertTrue(session.committed)
         self.assertEqual(stale.status, "pending")
-        self.assertEqual(stale.current_step, "采集 worker 心跳超时，等待自动恢复")
+        self.assertEqual(stale.current_step, "采集 worker 心跳超时，启动独立恢复 worker")
         self.assertIsNone(stale.worker_id)
         self.assertIsNone(stale.heartbeat_at)
         self.assertEqual(recent.status, "running")
         self.assertEqual(recent.worker_id, "worker-old")
-        submit.assert_called_once_with(21)
+        recovery_submit.assert_called_once_with(21)
+        normal_submit.assert_not_called()
 
     def test_empty_recovery_does_not_commit_or_submit(self):
         session = FakeSession([])
-        submit = Mock()
+        normal_submit = Mock()
+        recovery_submit = Mock()
 
         with patch("app.services.marketplace.recovery.SessionLocal", return_value=session), patch(
-            "app.services.marketplace.recovery.submit_run", submit
-        ):
+            "app.services.marketplace.recovery.submit_run", normal_submit
+        ), patch("app.services.marketplace.recovery.submit_recovery_run", recovery_submit):
             queued = recover_interrupted_runs()
 
         self.assertEqual(queued, 0)
         self.assertFalse(session.committed)
         self.assertTrue(session.closed)
-        submit.assert_not_called()
+        normal_submit.assert_not_called()
+        recovery_submit.assert_not_called()
 
 
 if __name__ == "__main__":
