@@ -9,20 +9,19 @@ import subprocess
 import sys
 import threading
 import time
-import webbrowser
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parent
+BACKEND = ROOT / "backend"
 PORT = 8011
 
 
 def python_executable() -> str:
     candidates = [
-        ROOT / "backend" / ".venv" / "bin" / "python",
-        ROOT / "backend" / ".venv" / "Scripts" / "python.exe",
-        ROOT / "backend" / "venv" / "bin" / "python",
-        ROOT / "backend" / "venv" / "Scripts" / "python.exe",
+        BACKEND / ".venv" / "bin" / "python",
+        BACKEND / ".venv" / "Scripts" / "python.exe",
+        BACKEND / "venv" / "bin" / "python",
+        BACKEND / "venv" / "Scripts" / "python.exe",
     ]
     for candidate in candidates:
         if candidate.exists():
@@ -38,7 +37,14 @@ def port_ready() -> bool:
 def open_when_ready() -> None:
     for _ in range(60):
         if port_ready():
-            webbrowser.open(f"http://localhost:{PORT}")
+            url = f"http://localhost:{PORT}"
+            try:
+                sys.path.insert(0, str(BACKEND))
+                from app.services.marketplace.browser import open_url
+                open_url(url)
+            except Exception as exc:
+                print(f"无法自动打开项目 Chrome：{exc}")
+                print(f"请安装/配置 Google Chrome 后手动访问：{url}")
             return
         time.sleep(0.5)
 
@@ -52,7 +58,7 @@ def main() -> int:
         return 1
 
     env = os.environ.copy()
-    env["PYTHONPATH"] = str(ROOT / "backend")
+    env["PYTHONPATH"] = str(BACKEND)
     command = [
         python_executable(), "-m", "uvicorn", "app.main:app",
         "--host", "0.0.0.0", "--port", str(PORT),
@@ -61,7 +67,7 @@ def main() -> int:
     print(f"地址：http://localhost:{PORT}")
     print("账号：admin@market.my / admin123")
     threading.Thread(target=open_when_ready, daemon=True).start()
-    process = subprocess.Popen(command, cwd=ROOT / "backend", env=env)
+    process = subprocess.Popen(command, cwd=BACKEND, env=env)
     try:
         return process.wait()
     except KeyboardInterrupt:
