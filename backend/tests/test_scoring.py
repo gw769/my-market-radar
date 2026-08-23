@@ -80,7 +80,11 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(result["sample_size"], 10)
         self.assertEqual(result["exclusion_breakdown"]["bundle"], 5)
         self.assertLess(relevance_score("water bottle", "2pcs water bottle bundle"), 0.6)
+        self.assertLess(relevance_score("water bottle", "2 units water bottle"), 0.6)
+        self.assertLess(relevance_score("water bottle", "water bottle 1+1 deal"), 0.6)
+        self.assertLess(relevance_score("water bottle", "buy 1 free 1 water bottle"), 0.6)
         self.assertEqual(relevance_score("water bottle set", "2pcs water bottle set"), 1.0)
+        self.assertEqual(relevance_score("aircon unit", "aircon unit inverter"), 1.0)
 
     def test_single_ascii_token_requires_token_boundary(self):
         self.assertEqual(relevance_score("pen", "ballpoint pen blue"), 1.0)
@@ -116,6 +120,33 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(concentrated_result["metrics"]["seller_count"], 1)
         self.assertEqual(dispersed_result["metrics"]["seller_count"], 20)
 
+    def test_partial_seller_identity_coverage_reduces_concentration_weight(self):
+        full = samples(20)
+        partial = samples(20)
+        for item in full:
+            item["shop_id"] = "head-store"
+        for index, item in enumerate(partial[:10]):
+            item["shop_id"] = "head-store"
+
+        full_result = score_platform(full, keyword="water bottle")
+        partial_result = score_platform(partial, keyword="water bottle")
+
+        self.assertEqual(full_result["metrics"]["seller_concentration"], 100.0)
+        self.assertEqual(partial_result["metrics"]["seller_concentration"], 100.0)
+        self.assertEqual(full_result["metrics"]["seller_evidence_reliability"], 100.0)
+        self.assertEqual(partial_result["metrics"]["seller_evidence_reliability"], 62.5)
+        # Same observed monopoly, but only half the rows have a seller identity. It should
+        # influence the platform score less strongly instead of pretending coverage is complete.
+        self.assertGreater(partial_result["score"], full_result["score"])
+
+    def test_low_seller_coverage_does_not_emit_strong_concentration_warning(self):
+        items = samples(20)
+        for item in items[:10]:
+            item["shop_id"] = "head-store"
+        analysis = build_analysis("water bottle", {"shopee": items})
+        seller_warnings = [text for text in analysis["recommendations"] if "头部集中度" in text]
+        self.assertEqual(seller_warnings, [])
+
     def test_small_sample_top5_floor_does_not_fake_concentration(self):
         items = samples(5, sold_base=100)
         for index, item in enumerate(items):
@@ -132,6 +163,7 @@ class ScoringTests(unittest.TestCase):
         result = score_platform(samples(20), keyword="water bottle")
         self.assertIsNone(result["metrics"]["seller_concentration"])
         self.assertEqual(result["metrics"]["seller_identity_coverage"], 0.0)
+        self.assertEqual(result["metrics"]["seller_evidence_reliability"], 0.0)
 
     def test_repeated_title_attributes_create_rankable_product_segments(self):
         items = (
