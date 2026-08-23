@@ -19,6 +19,7 @@ from app.services.marketplace.extension_bridge import (
 )
 
 settings = get_settings()
+EXTENSION_ACTION_TIMEOUT_SECONDS = 40
 
 
 class BrowserLaunchError(RuntimeError):
@@ -99,13 +100,24 @@ def _headless_required() -> bool:
 
 
 def ensure_browser(initial_urls: list[str] | None = None) -> None:
+    if settings.BROWSER_MODE == "extension":
+        if extension_ready():
+            return
+        try:
+            # A sleeping MV3 worker has no recent heartbeat, but queuing a command lets its
+            # fallback alarm wake and prove that the user's Chrome is still available.
+            extension_request(
+                "tabs", timeout=EXTENSION_ACTION_TIMEOUT_SECONDS
+            )
+            return
+        except ExtensionBridgeError as exc:
+            raise BrowserLaunchError(
+                "主 Google Chrome 扩展尚未连接。请保持你的 Chrome 打开，并确认 "
+                f"MY Market Radar Browser Bridge 已加载：{exc}"
+            ) from exc
+
     if browser_ready():
         return
-
-    if settings.BROWSER_MODE == "extension":
-        raise BrowserLaunchError(
-            "主 Google Chrome 扩展尚未连接。请保持你的 Chrome 打开，并确认 MY Market Radar Browser Bridge 已加载。"
-        )
 
     executable = find_chrome_executable()
     if not executable:
@@ -159,14 +171,18 @@ def ensure_browser(initial_urls: list[str] | None = None) -> None:
 
 
 def list_tabs() -> list[dict[str, Any]]:
-    if not browser_ready():
-        return []
     if settings.BROWSER_MODE == "extension":
         try:
-            payload = extension_request("tabs", timeout=5)
+            # MV3 may suspend the service worker between runs.  The managed extension's
+            # fallback alarm wakes every 30 seconds, so allow one complete wake cycle.
+            payload = extension_request(
+                "tabs", timeout=EXTENSION_ACTION_TIMEOUT_SECONDS
+            )
             return payload if isinstance(payload, list) else []
         except ExtensionBridgeError:
             return []
+    if not browser_ready():
+        return []
     try:
         with urllib.request.urlopen(f"{cdp_url()}/json/list", timeout=2) as response:
             payload = json.load(response)
@@ -274,7 +290,9 @@ def new_tab(url: str) -> dict[str, Any] | None:
     ensure_browser()
     if settings.BROWSER_MODE == "extension":
         try:
-            payload = extension_request("new_tab", timeout=10, url=url)
+            payload = extension_request(
+                "new_tab", timeout=EXTENSION_ACTION_TIMEOUT_SECONDS, url=url
+            )
             return payload if isinstance(payload, dict) else None
         except ExtensionBridgeError as exc:
             raise BrowserLaunchError(f"无法在你的 Chrome 中打开标签页：{exc}") from exc
@@ -306,7 +324,13 @@ def activate_tab(tab_id: str) -> bool:
         return False
     if settings.BROWSER_MODE == "extension":
         try:
-            return bool(extension_request("activate_tab", timeout=5, tab_id=tab_id))
+            return bool(
+                extension_request(
+                    "activate_tab",
+                    timeout=EXTENSION_ACTION_TIMEOUT_SECONDS,
+                    tab_id=tab_id,
+                )
+            )
         except ExtensionBridgeError:
             return False
     try:

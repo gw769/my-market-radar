@@ -13,7 +13,7 @@ from pathlib import Path
 
 
 EXTENSION_ID = "mfaihjehhndpmiakeolkpmkjnpllheho"
-EXTENSION_VERSION = "1.0.2"
+EXTENSION_VERSION = "1.0.3"
 PROJECT_ROOT = Path(__file__).parents[4]
 EXTENSION_CRX = PROJECT_ROOT / "chrome-extension.crx"
 
@@ -241,6 +241,7 @@ def extension_ready() -> bool:
 
 
 def extension_request(action: str, timeout: float = 50.0, **params: Any) -> Any:
-    if not extension_ready():
-        raise ExtensionBridgeError("主 Google Chrome 的 MY Market Radar 扩展尚未连接")
+    # A Manifest V3 service worker may be asleep and therefore have no recent heartbeat.
+    # Queue first and let the extension's alarm wake within the caller's timeout instead of
+    # rejecting a healthy, signed-in Chrome as disconnected.
     return bridge.request(action, timeout=timeout, **params)

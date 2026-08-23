@@ -9,6 +9,34 @@ def tab(tab_id: str, url: str, tab_type: str = "page") -> dict:
 
 
 class BrowserTabSelectionTests(unittest.TestCase):
+    def test_extension_actions_wait_through_one_alarm_wake_cycle(self):
+        with patch.object(browser.settings, "BROWSER_MODE", "extension"), patch.object(
+            browser, "browser_ready", return_value=False
+        ), patch.object(browser, "ensure_browser"), patch.object(
+            browser,
+            "extension_request",
+            side_effect=[[], {"id": "new", "url": "https://shopee.com.my/"}, True],
+        ) as request:
+            self.assertEqual(browser.list_tabs(), [])
+            self.assertEqual(browser.new_tab("https://shopee.com.my/")["id"], "new")
+            self.assertTrue(browser.activate_tab("new"))
+
+        self.assertGreaterEqual(browser.EXTENSION_ACTION_TIMEOUT_SECONDS, 30)
+        self.assertEqual(
+            [item.kwargs["timeout"] for item in request.call_args_list],
+            [browser.EXTENSION_ACTION_TIMEOUT_SECONDS] * 3,
+        )
+
+    def test_ensure_browser_wakes_a_sleeping_mv3_worker(self):
+        with patch.object(browser.settings, "BROWSER_MODE", "extension"), patch.object(
+            browser, "extension_ready", return_value=False
+        ), patch.object(browser, "extension_request", return_value=[]) as request:
+            browser.ensure_browser()
+
+        request.assert_called_once_with(
+            "tabs", timeout=browser.EXTENSION_ACTION_TIMEOUT_SECONDS
+        )
+
     def test_normal_collection_prefers_search_tab_over_home_or_challenge(self):
         tabs = [
             tab("home", "https://shopee.com.my/"),

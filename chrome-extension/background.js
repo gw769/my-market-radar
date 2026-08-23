@@ -130,16 +130,18 @@ async function sendResult(id, result, error) {
 async function pollBurst() {
   if (polling) return;
   polling = true;
+  let consecutiveFailures = 0;
   try {
     while (true) {
       try {
-        const response = await fetch(`${BRIDGE}/command?wait=1`, { cache: "no-store" });
+        // Keep one low-cost localhost long poll open while the app is available.  The old
+        // one-second burst stopped whenever there was no active debugger session, leaving
+        // ordinary actions such as "open verification" waiting for the next 30s alarm.
+        const response = await fetch(`${BRIDGE}/command?wait=20`, { cache: "no-store" });
         const payload = await response.json();
+        consecutiveFailures = 0;
         const command = payload.command;
-        if (!command) {
-          if (sessions.size === 0) break;
-          continue;
-        }
+        if (!command) continue;
         try {
           const result = await execute(command);
           await sendResult(command.id, result, null);
@@ -147,8 +149,9 @@ async function pollBurst() {
           await sendResult(command.id, null, String(error?.message || error));
         }
       } catch {
-        await sleep(500);
-        if (sessions.size === 0) break;
+        consecutiveFailures += 1;
+        if (sessions.size === 0 && consecutiveFailures >= 3) break;
+        await sleep(Math.min(500 * consecutiveFailures, 3000));
       }
     }
   } finally {
