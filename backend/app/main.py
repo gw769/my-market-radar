@@ -23,6 +23,7 @@ from app.core.logging import logger
 from app.core.exceptions import AppException
 import app.models  # noqa: F401 - 确保所有模型注册到 Base.metadata
 from app.api import api_router
+from app.services.marketplace.recovery import recover_interrupted_runs
 from app.services.marketplace.scheduler import start_scheduler, stop_scheduler
 
 settings = get_settings()
@@ -31,13 +32,14 @@ _frontend_out = _base_dir / "frontend" / "dist"
 if not _frontend_out.exists():
     _frontend_out = _project_root / "frontend" / "dist"
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("应用启动中...")
     init_db()
     logger.info("数据库初始化完成")
-    # 创建默认管理员账户（如果不存在）
     _ensure_default_admin()
+    recover_interrupted_runs()
     start_scheduler()
     yield
     stop_scheduler()
@@ -69,6 +71,7 @@ def _ensure_default_admin():
     finally:
         db.close()
 
+
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
@@ -76,6 +79,7 @@ app = FastAPI(
     redoc_url="/redoc",
     lifespan=lifespan,
 )
+
 
 @app.exception_handler(AppException)
 async def app_exception_handler(request: Request, exc: AppException):
@@ -86,6 +90,7 @@ async def app_exception_handler(request: Request, exc: AppException):
         content={"success": False, "message": exc.detail},
     )
 
+
 @app.exception_handler(FastAPIHTTPException)
 async def http_exception_handler(request: Request, exc: FastAPIHTTPException):
     """处理FastAPI HTTP异常（含验证错误）"""
@@ -95,6 +100,7 @@ async def http_exception_handler(request: Request, exc: FastAPIHTTPException):
         content={"success": False, "message": exc.detail},
     )
 
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     """处理未捕获的全局异常"""
@@ -103,6 +109,7 @@ async def global_exception_handler(request: Request, exc: Exception):
         status_code=500,
         content={"success": False, "message": "服务器内部错误，请稍后重试"},
     )
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -114,12 +121,13 @@ app.add_middleware(
 
 app.include_router(api_router)
 
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
+
 if _frontend_out.exists():
-    # Vite 构建: /assets (React SPA)
     _assets_dir = _frontend_out / "assets"
     if _assets_dir.exists():
         app.mount("/assets", StaticFiles(directory=str(_assets_dir)), name="assets")
@@ -133,14 +141,12 @@ if _frontend_out.exists():
         if full_path.startswith("api"):
             return JSONResponse({"error": "Not found"}, status_code=404)
 
-        # /assets/* 已通过 mount 处理，此处兜底。
         if full_path.startswith("assets/"):
             file_path = _frontend_out / full_path
             if file_path.is_file():
                 return FileResponse(str(file_path))
             return JSONResponse({"error": "Not found"}, status_code=404)
 
-        # 根目录下的静态文件（如 favicon.ico 等）
         file_path = _frontend_out / full_path
         if file_path.is_file():
             return FileResponse(str(file_path))
@@ -149,7 +155,6 @@ if _frontend_out.exists():
         if html_path.exists():
             return FileResponse(str(html_path))
 
-        # SPA fallback：所有其他路由返回 index.html，由前端路由处理
         return FileResponse(str(_frontend_out / "index.html"))
 else:
     @app.get("/")
