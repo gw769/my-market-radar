@@ -34,6 +34,21 @@ class TrendEvidenceTests(unittest.TestCase):
     def tearDown(self):
         self.engine.dispose()
 
+    def _snapshot(self, db, run, item_id, title, sold, reviews=10, rank=1, price=20.0, platform="shopee"):
+        db.add(ListingSnapshot(
+            run_id=run.id,
+            keyword_id=self.keyword_id,
+            platform=platform,
+            item_id=item_id,
+            title=title,
+            product_url=f"https://example.test/{run.id}/{item_id}",
+            price=price,
+            sold_count=sold,
+            review_count=reviews,
+            search_rank=rank,
+            data_quality=1.0,
+        ))
+
     def test_one_stable_run_is_insufficient_history(self):
         db = self.Session()
         run = AnalysisRun(
@@ -59,32 +74,14 @@ class TrendEvidenceTests(unittest.TestCase):
 
         for index in range(10):
             item_id = f"item-{index}"
-            db.add(ListingSnapshot(
-                run_id=previous.id,
-                keyword_id=self.keyword_id,
-                platform="shopee",
-                item_id=item_id,
-                title=f"Bottle {index}",
-                product_url=f"https://example.test/{item_id}",
-                price=20.0,
-                sold_count=100 + index,
-                review_count=20 + index,
-                search_rank=index + 2,
-                data_quality=1.0,
-            ))
-            db.add(ListingSnapshot(
-                run_id=current.id,
-                keyword_id=self.keyword_id,
-                platform="shopee",
-                item_id=item_id,
-                title=f"Bottle {index}",
-                product_url=f"https://example.test/{item_id}",
-                price=22.0 if index < 5 else 20.0,
-                sold_count=110 + index,
-                review_count=21 + index,
-                search_rank=index + 1,
-                data_quality=1.0,
-            ))
+            self._snapshot(
+                db, previous, item_id, f"Water Bottle {index}", 100 + index,
+                reviews=20 + index, rank=index + 2, price=20.0,
+            )
+            self._snapshot(
+                db, current, item_id, f"Water Bottle {index}", 110 + index,
+                reviews=21 + index, rank=index + 1, price=22.0 if index < 5 else 20.0,
+            )
         db.commit()
 
         trend = build_keyword_trend(db, self.keyword_id)
@@ -110,25 +107,45 @@ class TrendEvidenceTests(unittest.TestCase):
         db.add_all([previous, current])
         db.flush()
         for index in range(10):
-            for run, sold in ((previous, 100), (current, 105)):
-                db.add(ListingSnapshot(
-                    run_id=run.id,
-                    keyword_id=self.keyword_id,
-                    platform="lazada",
-                    item_id=f"item-{index}",
-                    title=f"Bottle {index}",
-                    product_url=f"https://example.test/{run.id}/{index}",
-                    price=20,
-                    sold_count=sold,
-                    review_count=10,
-                    search_rank=index + 1,
-                    data_quality=1.0,
-                ))
+            self._snapshot(db, previous, f"item-{index}", f"Water Bottle {index}", 100, platform="lazada")
+            self._snapshot(db, current, f"item-{index}", f"Water Bottle {index}", 105, platform="lazada")
         db.commit()
         trend = build_keyword_trend(db, self.keyword_id)
         self.assertEqual(trend["status"], "weak")
         self.assertIsNone(trend["overall"]["median_sold_velocity_per_day"])
         self.assertTrue(any("少于 6 小时" in text for text in trend["recommendations"]))
+        db.close()
+
+    def test_accessory_growth_is_excluded_from_temporal_demand(self):
+        db = self.Session()
+        previous = AnalysisRun(
+            keyword_id=self.keyword_id,
+            status="completed",
+            completed_at=datetime(2026, 8, 22, 12, 0, 0),
+        )
+        current = AnalysisRun(
+            keyword_id=self.keyword_id,
+            status="completed",
+            completed_at=datetime(2026, 8, 23, 12, 0, 0),
+        )
+        db.add_all([previous, current])
+        db.flush()
+
+        for index in range(6):
+            self._snapshot(db, previous, f"core-{index}", f"Water Bottle Stainless {index}", 100)
+            self._snapshot(db, current, f"core-{index}", f"Water Bottle Stainless {index}", 100)
+
+        # This accessory is growing very fast, but the main scoring path classifies it as an accessory.
+        self._snapshot(db, previous, "lid", "Replacement Lid for Water Bottle", 10)
+        self._snapshot(db, current, "lid", "Replacement Lid for Water Bottle", 1010)
+        db.commit()
+
+        trend = build_keyword_trend(db, self.keyword_id)
+        self.assertEqual(trend["overall"]["current_items"], 6)
+        self.assertEqual(trend["overall"]["matched_items"], 6)
+        self.assertEqual(trend["overall"]["activity_share"], 0.0)
+        self.assertEqual(trend["overall"]["median_sold_delta"], 0.0)
+        self.assertTrue(any("累计已售" in text for text in trend["recommendations"]))
         db.close()
 
 

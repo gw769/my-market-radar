@@ -30,6 +30,7 @@ from app.services.marketplace.browser import (
 from app.services.marketplace.calibration import calibrate_analysis
 from app.services.marketplace.evidence import build_evidence_summary
 from app.services.marketplace.health import assess_collection_health, summarize_collector_health
+from app.services.marketplace.raw_collection import RawCardAccumulator
 from app.services.marketplace.scoring import build_analysis
 
 settings = get_settings()
@@ -263,6 +264,7 @@ async def _collect_resident_tab(
 
     current_url = url
     body_text = ""
+    accumulator = RawCardAccumulator(max_cards=max(200, limit * 4))
     raw_cards: list[dict[str, Any]] = []
     last_heartbeat = 0.0
     async with websocket_connect(websocket_url, open_timeout=5, max_size=8 * 1024 * 1024) as socket:
@@ -301,7 +303,9 @@ async def _collect_resident_tab(
                 {"expression": f"({adapter.extraction_script})()", "returnByValue": True, "awaitPromise": True},
             )
             value = _runtime_value(cards, [])
-            raw_cards = value if isinstance(value, list) else []
+            round_cards = value if isinstance(value, list) else []
+            accumulator.add(round_cards)
+            raw_cards = accumulator.cards()
 
             usable_count = len(adapter.parse_cards(raw_cards, limit))
             if usable_count >= limit:
