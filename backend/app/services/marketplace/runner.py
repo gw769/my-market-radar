@@ -204,13 +204,17 @@ async def _collect_resident_tab(adapter: Any, keyword: str, limit: int) -> tuple
             )
             value = _runtime_value(cards, [])
             raw_cards = value if isinstance(value, list) else []
-            count = len(raw_cards)
-            if count >= limit:
+
+            # A marketplace card can expose multiple anchors (image/title/etc.). Counting raw
+            # anchors caused the collector to stop early with far fewer unique products than
+            # requested. Use the adapter's real deduplicated/validated result count instead.
+            usable_count = len(adapter.parse_cards(raw_cards, limit))
+            if usable_count >= limit:
                 break
-            stable_rounds = stable_rounds + 1 if count > 0 and count == previous_count else 0
-            if stable_rounds >= 2 and count >= min(6, limit):
+            stable_rounds = stable_rounds + 1 if usable_count > 0 and usable_count == previous_count else 0
+            if stable_rounds >= 2 and usable_count >= min(6, limit):
                 break
-            previous_count = count
+            previous_count = usable_count
 
             request_id += 1
             await _cdp_call(
