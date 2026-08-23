@@ -68,7 +68,7 @@ class BootstrapAndConfigTests(unittest.TestCase):
         self.assertIsNone(db.query(User).filter_by(email="admin@market.my").first())
         db.close()
 
-    def test_runtime_settings_reject_invalid_ports_timeout_and_schedule(self):
+    def test_runtime_settings_reject_invalid_ports_timeout_schedule_and_database(self):
         with self.assertRaises(ValueError):
             Settings(_env_file=None, BROWSER_CDP_PORT=70000)
         with self.assertRaises(ValueError):
@@ -77,6 +77,12 @@ class BootstrapAndConfigTests(unittest.TestCase):
             Settings(_env_file=None, DEFAULT_DAILY_TIME="25:99")
         with self.assertRaises(ValueError):
             Settings(_env_file=None, DEFAULT_TIMEZONE="Not/A_Timezone")
+        with self.assertRaises(ValueError):
+            Settings(_env_file=None, DATABASE_TYPE="postgres")
+
+    def test_database_type_is_normalized(self):
+        settings = Settings(_env_file=None, DATABASE_TYPE="MySQL")
+        self.assertEqual(settings.DATABASE_TYPE, "mysql")
 
     def test_default_malaysia_timezone_is_resolvable(self):
         settings = Settings(_env_file=None)
