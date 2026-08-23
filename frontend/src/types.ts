@@ -18,6 +18,7 @@ export interface OpportunitySegment {
   label: string; token?: string | null; opportunity_score: number; verdict: string;
   confidence: number; sample_size: number; share: number; platform_coverage: number;
   median_price?: number | null; seller_concentration?: number | null;
+  evidence_status?: "supported" | "exploratory";
   representative_titles: string[]; platform_scores: Record<string, PlatformScore>;
 }
 export interface Keyword {
