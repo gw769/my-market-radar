@@ -243,7 +243,13 @@ def find_platform_tab(platform: str, prefer_verification: bool = True) -> dict[s
     candidates = _platform_tabs(platform)
     if not candidates:
         return None
-    return max(candidates, key=lambda tab: _tab_priority(platform, tab, prefer_verification))
+    return max(
+        candidates,
+        key=lambda tab: (
+            _tab_priority(platform, tab, prefer_verification),
+            str(tab.get("id") or ""),
+        ),
+    )
 
 
 def new_tab(url: str) -> dict[str, Any] | None:
