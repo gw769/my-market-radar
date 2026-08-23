@@ -9,15 +9,36 @@ def _coverage(items: list[Any], field: str) -> float:
     return sum(getattr(item, field, None) is not None for item in items) / len(items)
 
 
+def _raw_card_key(card: dict[str, Any], index: int) -> str:
+    item_id = str(card.get("item_id") or "").strip()
+    if item_id:
+        return f"item:{item_id}"
+    href = str(card.get("href") or "").strip()
+    if href:
+        return f"href:{href.split('?')[0]}"
+    title = " ".join(str(card.get("title") or "").lower().split())
+    if title:
+        return f"title:{title}"
+    return f"row:{index}"
+
+
+def _unique_raw_count(raw_cards: list[dict[str, Any]]) -> int:
+    return len({_raw_card_key(card, index) for index, card in enumerate(raw_cards)})
+
+
 def assess_collection_health(
     raw_cards: list[dict[str, Any]],
     listings: list[Any],
     target_limit: int,
 ) -> dict[str, Any]:
     """Describe whether the collector itself looks healthy, separate from market quality."""
-    raw_count = len(raw_cards)
+    raw_rows = len(raw_cards)
+    raw_count = _unique_raw_count(raw_cards)
     parsed_count = len(listings)
     parse_ratio = parsed_count / raw_count if raw_count else (1.0 if parsed_count else 0.0)
+    # Defensive cap: a parser can occasionally synthesize one row from a card variant. Health
+    # should never exceed 100% merely because raw-card identity was incomplete.
+    parse_ratio = min(1.0, parse_ratio)
     target_coverage = min(1.0, parsed_count / max(1, target_limit))
     price_coverage = _coverage(listings, "price")
     sold_coverage = _coverage(listings, "sold_count")
@@ -64,6 +85,7 @@ def assess_collection_health(
     return {
         "status": status,
         "health_score": round(max(0.0, min(100.0, score)), 1),
+        "raw_rows": raw_rows,
         "raw_count": raw_count,
         "parsed_count": parsed_count,
         "target_limit": target_limit,
