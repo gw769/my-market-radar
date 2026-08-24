@@ -9,7 +9,11 @@ from app.core.security import get_current_user
 from app.models.marketplace import AnalysisRun, TrackedKeyword
 from app.models.user import User
 from app.schemas.marketplace import RunCreate
-from app.services.marketplace.query_localization import marketplace_search_term
+from app.services.marketplace.query_localization import (
+    effective_localization,
+    marketplace_search_term,
+    relevance_phrases,
+)
 from app.services.marketplace.runner import create_run, submit_run
 
 router = APIRouter(prefix="/api/discovery", tags=["Malaysia market discovery"])
@@ -64,9 +68,17 @@ def deep_scan_keyword(
         return {"success": True, "queued": False, "reason": "active_run", "run": _run_payload(run)}
 
     base_platforms = [str(platform) for platform in (keyword.platforms or [])]
+    localization = effective_localization(keyword.keyword, keyword.localization)
     request_config = {
         "keyword": keyword.keyword,
-        "marketplace_query": marketplace_search_term(keyword.keyword),
+        "marketplace_query": marketplace_search_term(keyword.keyword, localization),
+        "relevance_phrases": list(
+            relevance_phrases(
+                keyword.keyword,
+                localization.get("aliases") if localization else None,
+            )
+        ),
+        "localization": localization,
         "platforms": list(payload.platforms or base_platforms),
         "results_limit": int(payload.results_limit or keyword.results_limit),
         "search_pages": settings.SEARCH_PAGES,

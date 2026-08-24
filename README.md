@@ -75,6 +75,19 @@ Extension 路径必须在进程环境或根目录 `.env` 中明确配置：
 BROWSER_MODE=extension
 ```
 
+可选的 OpenAI-compatible AI 辅助层使用服务器端环境变量：
+
+```text
+LLM_PROVIDER=openai_compatible
+LLM_API_KEY=你的服务端密钥
+LLM_BASE_URL=https://your-openai-compatible-host
+LLM_MODEL=gpt-5.6-sol
+LLM_REASONING_EFFORT=low
+LLM_TIMEOUT_SECONDS=70
+```
+
+AI 只做两件事：把用户关键词收窄翻译成马来西亚站英文/马来文严格同义词；在分析完成后解读已经聚合的公开字段。翻译结果会按关键词缓存；API 不可用时自动使用原词继续。机会分、证据等级、平台结论和商品过滤始终由确定性规则生成，AI 无权修改，也不会接收站点登录信息或浏览器 Cookie。
+
 然后可以从项目根目录使用现有本机 launcher：
 
 ```bash

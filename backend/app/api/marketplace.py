@@ -17,6 +17,8 @@ from app.models.marketplace import AnalysisRun, ListingSnapshot, TrackedKeyword
 from app.models.user import User
 from app.schemas.marketplace import KeywordCreate, KeywordUpdate
 from app.services.marketplace.query_localization import marketplace_search_term
+from app.services.marketplace.query_localization import effective_localization
+from app.services.marketplace.ai import ai_status
 from app.services.marketplace.report import build_report
 from app.services.marketplace.runner import create_run, open_verification_browser, submit_run
 from app.services.marketplace.scheduler import next_run_utc
@@ -40,10 +42,12 @@ def _keyword_payload(
     detail: Literal["full", "summary"] = "full",
 ) -> dict:
     run_payload = _run_summary_payload if detail == "summary" else _run_payload
+    localization = effective_localization(keyword.keyword, keyword.localization)
     return {
         "id": keyword.id,
         "keyword": keyword.keyword,
-        "marketplace_query": marketplace_search_term(keyword.keyword),
+        "marketplace_query": marketplace_search_term(keyword.keyword, localization),
+        "localization": localization,
         "platforms": keyword.platforms,
         "results_limit": keyword.results_limit,
         "search_pages": settings.SEARCH_PAGES,
@@ -203,6 +207,7 @@ def marketplace_defaults(current_user: User = Depends(get_current_user)):
             "daily_time": settings.DEFAULT_DAILY_TIME,
             "timezone": settings.DEFAULT_TIMEZONE,
             "platforms": ["shopee", "lazada"],
+            "ai": ai_status(),
         },
     }
 

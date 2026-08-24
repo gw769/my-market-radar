@@ -35,10 +35,20 @@ from app.services.marketplace.browser import (
 )
 from app.services.marketplace.calibration import calibrate_analysis
 from app.services.marketplace.evidence import build_evidence_summary
+from app.services.marketplace.ai import (
+    MarketplaceAIError,
+    ai_status,
+    generate_market_insights,
+    translate_keyword,
+)
 from app.services.marketplace.extension_bridge import ExtensionBridgeError, extension_request
 from app.services.marketplace.health import assess_collection_health, summarize_collector_health
 from app.services.marketplace.raw_collection import RawCardAccumulator, raw_card_key
-from app.services.marketplace.query_localization import marketplace_search_term
+from app.services.marketplace.query_localization import (
+    effective_localization,
+    marketplace_search_term,
+    relevance_phrases,
+)
 from app.services.marketplace.scoring import build_analysis
 
 settings = get_settings()
@@ -105,9 +115,18 @@ def _worker_token(run_id: int) -> str:
 def _request_config(keyword: TrackedKeyword) -> dict[str, Any]:
     results_limit = int(keyword.results_limit)
     search_pages = int(settings.SEARCH_PAGES)
+    localization = effective_localization(keyword.keyword, keyword.localization)
+    aliases = list(
+        relevance_phrases(
+            keyword.keyword,
+            localization.get("aliases") if localization else None,
+        )
+    )
     return {
         "keyword": keyword.keyword,
-        "marketplace_query": marketplace_search_term(keyword.keyword),
+        "marketplace_query": marketplace_search_term(keyword.keyword, localization),
+        "relevance_phrases": aliases,
+        "localization": localization,
         "platforms": list(keyword.platforms or []),
         "results_limit": results_limit,
         "search_pages": search_pages,
@@ -127,18 +146,40 @@ def _collection_request(run: AnalysisRun, keyword: TrackedKeyword) -> SimpleName
         search_pages = max(1, min(5, int(config.get("search_pages", settings.SEARCH_PAGES))))
     except (TypeError, ValueError):
         search_pages = int(settings.SEARCH_PAGES)
+    localization = effective_localization(
+        keyword.keyword,
+        config.get("localization") or keyword.localization,
+    )
+    stored_phrases = config.get("relevance_phrases")
+    aliases = list(
+        relevance_phrases(
+            str(config.get("keyword") or keyword.keyword),
+            stored_phrases if isinstance(stored_phrases, list) else (
+                localization.get("aliases") if localization else None
+            ),
+        )
+    )
+    marketplace_query = str(
+        config.get("marketplace_query")
+        or marketplace_search_term(
+            str(config.get("keyword") or keyword.keyword),
+            localization,
+        )
+    )
     return SimpleNamespace(
         id=keyword.id,
         keyword=str(config.get("keyword") or keyword.keyword),
+        marketplace_query=marketplace_query,
+        relevance_phrases=aliases,
+        localization=localization,
         platforms=platforms,
         results_limit=results_limit,
         search_pages=search_pages,
         request_config={
             "keyword": str(config.get("keyword") or keyword.keyword),
-            "marketplace_query": str(
-                config.get("marketplace_query")
-                or marketplace_search_term(str(config.get("keyword") or keyword.keyword))
-            ),
+            "marketplace_query": marketplace_query,
+            "relevance_phrases": aliases,
+            "localization": localization,
             "platforms": platforms,
             "results_limit": results_limit,
             "search_pages": search_pages,
@@ -174,6 +215,83 @@ def create_run(db: Session, keyword: TrackedKeyword, trigger: str = "manual") ->
         db.commit()
         db.refresh(run)
         return run
+
+
+def _prepare_run_localization(run_id: int, worker_id: str) -> None:
+    """Resolve and cache exact marketplace aliases without making AI a collection dependency."""
+    db = SessionLocal()
+    try:
+        run = db.query(AnalysisRun).filter(
+            AnalysisRun.id == run_id,
+            AnalysisRun.worker_id == worker_id,
+            AnalysisRun.status == "running",
+        ).first()
+        if not run:
+            raise WorkerLeaseLost("关键词翻译前 worker 租约已失效")
+        keyword = db.query(TrackedKeyword).filter(TrackedKeyword.id == run.keyword_id).first()
+        if not keyword:
+            raise RuntimeError("关键词不存在")
+        if effective_localization(keyword.keyword, keyword.localization):
+            return
+        source_keyword = keyword.keyword
+    finally:
+        db.close()
+
+    if not ai_status()["enabled"]:
+        return
+
+    try:
+        localization = translate_keyword(source_keyword)
+    except MarketplaceAIError as exc:
+        logger.warning("AI 关键词翻译失败，使用原词继续 run=%s: %s", run_id, exc)
+        db = SessionLocal()
+        try:
+            run = db.query(AnalysisRun).filter(
+                AnalysisRun.id == run_id,
+                AnalysisRun.worker_id == worker_id,
+                AnalysisRun.status == "running",
+            ).first()
+            if run:
+                run.analysis = {
+                    **(run.analysis or {}),
+                    "localization_status": {
+                        "status": "fallback",
+                        "message": "AI 翻译暂不可用，已使用原关键词继续采集",
+                    },
+                }
+                run.heartbeat_at = _utcnow()
+                db.commit()
+        finally:
+            db.close()
+        return
+
+    db = SessionLocal()
+    try:
+        run = db.query(AnalysisRun).filter(
+            AnalysisRun.id == run_id,
+            AnalysisRun.worker_id == worker_id,
+            AnalysisRun.status == "running",
+        ).first()
+        if not run:
+            raise WorkerLeaseLost("关键词翻译后 worker 租约已失效")
+        keyword = db.query(TrackedKeyword).filter(TrackedKeyword.id == run.keyword_id).first()
+        if not keyword:
+            raise RuntimeError("关键词不存在")
+        keyword.localization = localization
+        keyword.localization_updated_at = _utcnow()
+        run.analysis = {
+            **(run.analysis or {}),
+            "localization_status": {
+                "status": "completed",
+                "source": localization.get("source"),
+                "model": localization.get("model"),
+            },
+            "request_config": _request_config(keyword),
+        }
+        run.heartbeat_at = _utcnow()
+        db.commit()
+    finally:
+        db.close()
 
 
 def _execute_queued(run_id: int) -> None:
@@ -712,7 +830,7 @@ def _enrich_first_listing(existing: MarketplaceListing, incoming: MarketplaceLis
 
 async def _collect_resident_tab(
     adapter: Any,
-    keyword: str,
+    search_term: str,
     limit: int,
     search_pages: int,
     run_id: int,
@@ -727,7 +845,7 @@ async def _collect_resident_tab(
     list[str],
     list[dict[str, Any]],
 ]:
-    url = adapter.search_url(keyword)
+    url = adapter.search_url(search_term)
     if settings.BROWSER_MODE == "extension":
         socket_context: Any = _ExtensionCDPSocket(
             adapter.platform,
@@ -822,7 +940,7 @@ async def _collect_resident_tab(
             min(float(settings.COLLECTION_TIMEOUT_SECONDS), _PAGE_MAX_SECONDS),
         )
         for page_number in range(1, pages + 1):
-            page_url = adapter.search_url(keyword, page=page_number)
+            page_url = adapter.search_url(search_term, page=page_number)
             page_raw = RawCardAccumulator(max_cards=max(100, limit * 4))
             page_started = time.monotonic()
             page_deadline = page_started + page_window
@@ -1168,7 +1286,10 @@ async def _collect(
     if not platforms:
         raise RuntimeError("未选择有效平台")
 
-    initial_urls = [ADAPTERS[platform].search_url(keyword.keyword) for platform in platforms]
+    initial_urls = [
+        ADAPTERS[platform].search_url(keyword.marketplace_query)
+        for platform in platforms
+    ]
     ensure_browser(initial_urls[:1])
 
     for index, platform in enumerate(platforms):
@@ -1187,7 +1308,7 @@ async def _collect(
                 page_diagnostics,
             ) = await _collect_resident_tab(
                 adapter,
-                keyword.keyword,
+                keyword.marketplace_query,
                 keyword.results_limit,
                 keyword.search_pages,
                 run_id,
@@ -1371,13 +1492,20 @@ def execute_run_sync(run_id: int) -> None:
         keyword = db.query(TrackedKeyword).filter(TrackedKeyword.id == run.keyword_id).first()
         if not keyword:
             return
-        collection_request = _collection_request(run, keyword)
+        needs_ai_localization = (
+            effective_localization(keyword.keyword, keyword.localization) is None
+            and bool(ai_status()["enabled"])
+        )
         run.status = "running"
         run.progress = max(int(run.progress or 0), 5)
         run.current_step = (
-            "连接你已登录的 Google Chrome"
-            if settings.BROWSER_MODE == "extension"
-            else "准备采集浏览器"
+            "AI 正在翻译马来西亚站搜索词"
+            if needs_ai_localization
+            else (
+                "连接你已登录的 Google Chrome"
+                if settings.BROWSER_MODE == "extension"
+                else "准备采集浏览器"
+            )
         )
         run.started_at = _utcnow()
         run.completed_at = None
@@ -1385,12 +1513,40 @@ def execute_run_sync(run_id: int) -> None:
         run.verification_platform = None
         run.worker_id = worker_id
         run.heartbeat_at = _utcnow()
-        run.analysis = {**(run.analysis or {}), "request_config": collection_request.request_config}
+        run.analysis = {**(run.analysis or {}), "request_config": _request_config(keyword)}
         db.commit()
     finally:
         db.close()
 
     try:
+        _prepare_run_localization(run_id, worker_id)
+        db = SessionLocal()
+        try:
+            run = db.query(AnalysisRun).filter(
+                AnalysisRun.id == run_id,
+                AnalysisRun.worker_id == worker_id,
+                AnalysisRun.status == "running",
+            ).first()
+            if not run:
+                raise WorkerLeaseLost("建立采集请求前 worker 租约已失效")
+            keyword = db.query(TrackedKeyword).filter(TrackedKeyword.id == run.keyword_id).first()
+            if not keyword:
+                raise RuntimeError("关键词不存在")
+            collection_request = _collection_request(run, keyword)
+            run.current_step = (
+                "连接你已登录的 Google Chrome"
+                if settings.BROWSER_MODE == "extension"
+                else "准备采集浏览器"
+            )
+            run.analysis = {
+                **(run.analysis or {}),
+                "request_config": collection_request.request_config,
+            }
+            run.heartbeat_at = _utcnow()
+            db.commit()
+        finally:
+            db.close()
+
         collected, collection_errors, platform_health = asyncio.run(
             _collect(collection_request, run_id, worker_id)
         )
@@ -1399,6 +1555,68 @@ def execute_run_sync(run_id: int) -> None:
         return
     except WorkerLeaseLost:
         logger.warning("worker 租约已失效，停止旧采集 run=%s worker=%s", run_id, worker_id)
+        return
+    except Exception as exc:
+        _mark_failed(run_id, exc, worker_id)
+        return
+
+    try:
+        _require_lease(
+            run_id,
+            worker_id,
+            progress=75,
+            current_step="计算公开数据机会分",
+        )
+        by_platform = {
+            platform: [listing.to_dict() for listing in listings]
+            for platform, listings in collected.items()
+        }
+        analysis = calibrate_analysis(
+            build_analysis(
+                collection_request.keyword,
+                by_platform,
+                relevance_aliases=collection_request.relevance_phrases,
+            )
+        )
+        collector_health = summarize_collector_health(
+            platform_health,
+            collection_request.platforms,
+        )
+        evidence = build_evidence_summary(
+            analysis["platform_scores"],
+            collector_health,
+            collection_request.platforms,
+        )
+        analysis["collector_health"] = collector_health
+        analysis["evidence"] = evidence
+        _apply_evidence_gate(analysis, evidence)
+
+        if ai_status()["enabled"]:
+            _require_lease(
+                run_id,
+                worker_id,
+                progress=82,
+                current_step="AI 解读公开数据证据",
+            )
+            try:
+                analysis["ai"] = generate_market_insights(analysis)
+            except MarketplaceAIError as exc:
+                logger.warning("AI 市场解读失败，保留规则结论 run=%s: %s", run_id, exc)
+                analysis["ai"] = {
+                    "status": "unavailable",
+                    "model": settings.LLM_MODEL,
+                    "message": "AI 解读暂不可用，规则评分与结论不受影响",
+                    "score_changed": False,
+                }
+        else:
+            analysis["ai"] = {
+                "status": "disabled",
+                "message": "未配置 AI，当前展示完整规则分析",
+                "score_changed": False,
+            }
+        _require_lease(run_id, worker_id, progress=88, current_step="保存分析结果")
+    except WorkerLeaseLost:
+        logger.warning("分析阶段 worker 租约已失效 run=%s worker=%s", run_id, worker_id)
         return
     except Exception as exc:
         _mark_failed(run_id, exc, worker_id)
@@ -1416,8 +1634,8 @@ def execute_run_sync(run_id: int) -> None:
             .update(
                 {
                     AnalysisRun.heartbeat_at: _utcnow(),
-                    AnalysisRun.current_step: "计算公开数据机会分",
-                    AnalysisRun.progress: 75,
+                    AnalysisRun.current_step: "保存分析结果",
+                    AnalysisRun.progress: 90,
                 },
                 synchronize_session=False,
             )
@@ -1434,18 +1652,6 @@ def execute_run_sync(run_id: int) -> None:
             return
         _persist_results(db, run, keyword, collected)
         db.flush()
-
-        by_platform = {platform: [listing.to_dict() for listing in listings] for platform, listings in collected.items()}
-        analysis = calibrate_analysis(build_analysis(collection_request.keyword, by_platform))
-        collector_health = summarize_collector_health(platform_health, collection_request.platforms)
-        evidence = build_evidence_summary(
-            analysis["platform_scores"],
-            collector_health,
-            collection_request.platforms,
-        )
-        analysis["collector_health"] = collector_health
-        analysis["evidence"] = evidence
-        _apply_evidence_gate(analysis, evidence)
 
         counts = {platform: len(items) for platform, items in collected.items()}
         expected = set(collection_request.platforms)
@@ -1511,7 +1717,16 @@ def open_verification_browser(run_id: int) -> str:
         if not keyword:
             raise ValueError("关键词不存在")
         platform = run.verification_platform if run.verification_platform in ADAPTERS else "shopee"
-        url = ADAPTERS[platform].search_url(keyword.keyword)
+        request_config = (
+            (run.analysis or {}).get("request_config")
+            if isinstance(run.analysis, dict)
+            else {}
+        )
+        search_term = str(
+            (request_config or {}).get("marketplace_query")
+            or marketplace_search_term(keyword.keyword, keyword.localization)
+        )
+        url = ADAPTERS[platform].search_url(search_term)
         verification_context = (
             (run.analysis or {}).get("verification_context")
             if isinstance(run.analysis, dict)

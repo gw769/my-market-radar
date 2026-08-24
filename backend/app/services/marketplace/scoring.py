@@ -4,7 +4,7 @@ import math
 import re
 import statistics
 from collections import Counter, defaultdict
-from typing import Any
+from typing import Any, Iterable
 
 from app.services.marketplace.query_localization import relevance_phrases
 
@@ -175,21 +175,29 @@ def _single_phrase_relevance_score(keyword: str, title: str) -> float:
     return round(overlap, 4)
 
 
-def relevance_score(keyword: str, title: str) -> float:
-    phrases = relevance_phrases(keyword)
+def relevance_score(
+    keyword: str,
+    title: str,
+    relevance_aliases: Iterable[Any] | None = None,
+) -> float:
+    phrases = relevance_phrases(keyword, relevance_aliases)
     if not phrases:
         return 0.0
     return max(_single_phrase_relevance_score(phrase, title) for phrase in phrases)
 
 
-def _exclusion_reason(keyword: str, title: str) -> str | None:
+def _exclusion_reason(
+    keyword: str,
+    title: str,
+    relevance_aliases: Iterable[Any] | None = None,
+) -> str | None:
     # A localized alias can establish that an apparent accessory word is actually the
     # requested product ("sticker" in "nail sticker"). Only classify the row after all
     # strict aliases have had a chance to match.
-    phrases = relevance_phrases(keyword) or (keyword,)
+    phrases = relevance_phrases(keyword, relevance_aliases) or (keyword,)
     if any(_looks_like_bundle(phrase, title) for phrase in phrases):
         return "bundle"
-    if relevance_score(keyword, title) >= 0.6:
+    if relevance_score(keyword, title, relevance_aliases) >= 0.6:
         return None
     if any(_looks_like_accessory(phrase, title) for phrase in phrases):
         return "accessory"
@@ -197,7 +205,9 @@ def _exclusion_reason(keyword: str, title: str) -> str | None:
 
 
 def _relevant_items(
-    items: list[dict[str, Any]], keyword: str | None
+    items: list[dict[str, Any]],
+    keyword: str | None,
+    relevance_aliases: Iterable[Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     if not keyword:
         return items, {"accessory": 0, "bundle": 0, "low_relevance": 0}
@@ -205,7 +215,7 @@ def _relevant_items(
     excluded = {"accessory": 0, "bundle": 0, "low_relevance": 0}
     for item in items:
         title = str(item.get("title") or "")
-        reason = _exclusion_reason(keyword, title)
+        reason = _exclusion_reason(keyword, title, relevance_aliases)
         if reason:
             excluded[reason] += 1
         else:
@@ -352,9 +362,10 @@ def score_platform(
     items: list[dict[str, Any]],
     keyword: str | None = None,
     min_sample_size: int = 10,
+    relevance_aliases: Iterable[Any] | None = None,
 ) -> dict[str, Any]:
     raw_sample_size = len(items)
-    items, exclusion_breakdown = _relevant_items(items, keyword)
+    items, exclusion_breakdown = _relevant_items(items, keyword, relevance_aliases)
     excluded_irrelevant = sum(exclusion_breakdown.values())
     sample_size = len(items)
 
@@ -494,11 +505,15 @@ def score_platform(
     }
 
 
-def _segment_feature_tokens(title: str, keyword: str) -> set[str]:
+def _segment_feature_tokens(
+    title: str,
+    keyword: str,
+    relevance_aliases: Iterable[Any] | None = None,
+) -> set[str]:
     # Localized aliases describe the same product family, not separate opportunity segments.
     query_tokens = {
         token
-        for phrase in (relevance_phrases(keyword) or (keyword,))
+        for phrase in (relevance_phrases(keyword, relevance_aliases) or (keyword,))
         for token in _tokens(phrase)
     }
     features: set[str] = set()
@@ -515,12 +530,18 @@ def _segment_feature_tokens(title: str, keyword: str) -> set[str]:
     return features
 
 
-def _segment_candidates(keyword: str, items: list[dict[str, Any]]) -> list[str]:
+def _segment_candidates(
+    keyword: str,
+    items: list[dict[str, Any]],
+    relevance_aliases: Iterable[Any] | None = None,
+) -> list[str]:
     if len(items) < 6:
         return []
     document_frequency: Counter[str] = Counter()
     for item in items:
-        document_frequency.update(_segment_feature_tokens(str(item.get("title") or ""), keyword))
+        document_frequency.update(
+            _segment_feature_tokens(str(item.get("title") or ""), keyword, relevance_aliases)
+        )
 
     minimum = max(2, math.ceil(len(items) * 0.12))
     maximum = max(minimum, math.floor(len(items) * 0.75))
@@ -543,15 +564,16 @@ def build_opportunity_segments(
     keyword: str,
     by_platform: dict[str, list[dict[str, Any]]],
     min_segment_size: int = 4,
+    relevance_aliases: Iterable[Any] | None = None,
 ) -> list[dict[str, Any]]:
     relevant_by_platform: dict[str, list[dict[str, Any]]] = {}
     combined: list[dict[str, Any]] = []
     for platform, items in by_platform.items():
-        relevant, _ = _relevant_items(items, keyword)
+        relevant, _ = _relevant_items(items, keyword, relevance_aliases)
         relevant_by_platform[platform] = relevant
         combined.extend(relevant)
 
-    candidates = _segment_candidates(keyword, combined)
+    candidates = _segment_candidates(keyword, combined, relevance_aliases)
     if not candidates:
         return []
 
@@ -559,7 +581,9 @@ def build_opportunity_segments(
     representatives: dict[str, list[str]] = defaultdict(list)
     for platform, items in relevant_by_platform.items():
         for item in items:
-            features = _segment_feature_tokens(str(item.get("title") or ""), keyword)
+            features = _segment_feature_tokens(
+                str(item.get("title") or ""), keyword, relevance_aliases
+            )
             label = next((candidate for candidate in candidates if candidate in features), "core")
             assigned[label][platform].append(item)
             if len(representatives[label]) < 2:
@@ -625,9 +649,17 @@ def build_opportunity_segments(
     return segments[:5]
 
 
-def build_analysis(keyword: str, by_platform: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+def build_analysis(
+    keyword: str,
+    by_platform: dict[str, list[dict[str, Any]]],
+    relevance_aliases: Iterable[Any] | None = None,
+) -> dict[str, Any]:
     platform_scores = {
-        platform: score_platform(items, keyword=keyword)
+        platform: score_platform(
+            items,
+            keyword=keyword,
+            relevance_aliases=relevance_aliases,
+        )
         for platform, items in by_platform.items()
     }
     requested = list(platform_scores.values())
@@ -644,7 +676,11 @@ def build_analysis(keyword: str, by_platform: dict[str, list[dict[str, Any]]]) -
         else 0
     )
     verdict = _verdict(combined_score, all_eligible)
-    opportunity_segments = build_opportunity_segments(keyword, by_platform)
+    opportunity_segments = build_opportunity_segments(
+        keyword,
+        by_platform,
+        relevance_aliases=relevance_aliases,
+    )
 
     recommendations: list[str] = []
     if not all_eligible:

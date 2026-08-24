@@ -81,8 +81,11 @@ class RunnerStateTests(unittest.TestCase):
         db.close()
         runner._queued_run_ids.clear()
         runner._requeue_requested.clear()
+        self.ai_status_patch = patch.object(runner, "ai_status", return_value={"enabled": False})
+        self.ai_status_patch.start()
 
     def tearDown(self):
+        self.ai_status_patch.stop()
         runner._queued_run_ids.clear()
         runner._requeue_requested.clear()
         self.engine.dispose()
@@ -96,6 +99,8 @@ class RunnerStateTests(unittest.TestCase):
             {
                 "keyword": "water bottle",
                 "marketplace_query": "water bottle",
+                "relevance_phrases": ["water bottle"],
+                "localization": None,
                 "platforms": ["shopee", "lazada"],
                 "results_limit": 20,
                 "search_pages": 3,
@@ -145,6 +150,37 @@ class RunnerStateTests(unittest.TestCase):
         self.assertEqual(len(set(run_ids)), 1)
         db = self.Session()
         self.assertEqual(db.query(AnalysisRun).filter_by(keyword_id=self.keyword_id).count(), 1)
+        db.close()
+
+    def test_ai_localization_is_cached_and_frozen_into_run_request(self):
+        db = self.Session()
+        keyword = db.query(TrackedKeyword).filter_by(id=self.keyword_id).one()
+        run = runner.create_run(db, keyword)
+        run.status = "running"
+        run.worker_id = "worker-ai-test"
+        db.commit()
+        run_id = run.id
+        db.close()
+
+        localization = {
+            "keyword": "water bottle",
+            "search_term": "water bottle",
+            "aliases": ["water bottle", "botol air"],
+            "source": "ai",
+            "model": "gpt-5.6-sol",
+        }
+        with patch.object(runner, "SessionLocal", self.Session), patch.object(
+            runner, "ai_status", return_value={"enabled": True}
+        ), patch.object(runner, "translate_keyword", return_value=localization):
+            runner._prepare_run_localization(run_id, "worker-ai-test")
+
+        db = self.Session()
+        keyword = db.query(TrackedKeyword).filter_by(id=self.keyword_id).one()
+        run = db.query(AnalysisRun).filter_by(id=run_id).one()
+        self.assertEqual(keyword.localization, localization)
+        self.assertEqual(run.analysis["request_config"]["marketplace_query"], "water bottle")
+        self.assertIn("botol air", run.analysis["request_config"]["relevance_phrases"])
+        self.assertEqual(run.analysis["localization_status"]["status"], "completed")
         db.close()
 
     def test_submit_during_finishing_worker_is_requeued_not_lost(self):

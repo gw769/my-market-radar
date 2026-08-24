@@ -31,6 +31,8 @@ class TrackedKeyword(Base):
     tracking_enabled = Column(Boolean, nullable=False, default=True)
     daily_time = Column(String(5), nullable=False, default="20:00")
     timezone = Column(String(64), nullable=False, default="Asia/Kuala_Lumpur")
+    localization = Column(JSON, nullable=True)
+    localization_updated_at = Column(DateTime, nullable=True)
     last_run_at = Column(DateTime, nullable=True)
     last_success_at = Column(DateTime, nullable=True)
     next_run_at = Column(DateTime, nullable=True)

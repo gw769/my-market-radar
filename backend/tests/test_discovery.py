@@ -60,6 +60,8 @@ class DiscoveryDeepScanTests(unittest.TestCase):
         expected_request = {
             "keyword": "water bottle",
             "marketplace_query": "water bottle",
+            "relevance_phrases": ["water bottle"],
+            "localization": None,
             "platforms": ["shopee", "lazada"],
             "results_limit": 40,
             "search_pages": 3,

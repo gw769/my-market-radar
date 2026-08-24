@@ -27,8 +27,19 @@ export interface OpportunitySegment {
   median_price?: number | null; seller_concentration?: number | null;
   representative_titles: string[]; platform_scores: Record<string, PlatformScore>;
 }
+export interface KeywordLocalization {
+  keyword: string; search_term: string; aliases: string[];
+  source: "deterministic" | "ai" | string; model?: string | null;
+}
+export interface AIInsight {
+  status: "completed" | "unavailable" | "disabled" | string;
+  model?: string | null; generated_at?: string; summary?: string;
+  findings?: string[]; risks?: string[]; actions?: string[];
+  message?: string; score_changed?: boolean; evidence_scope?: string;
+}
 export interface Keyword {
   id: number; keyword: string; marketplace_query?: string; platforms: string[]; results_limit: number; search_pages?: number;
+  localization?: KeywordLocalization | null;
   tracking_enabled: boolean; daily_time: string; timezone: string;
   last_run_at?: string; last_success_at?: string; next_run_at?: string;
   latest_run?: RunSummary | null; latest_result_run?: RunSummary | null;

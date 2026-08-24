@@ -76,6 +76,13 @@ def build_report(db: Session, run: AnalysisRun) -> BytesIO:
             "平台实际搜索词",
             request_config.get("marketplace_query") or request_config.get("keyword") or "—",
         ])
+        localization = request_config.get("localization") or {}
+        if localization:
+            _append(summary, [
+                "关键词翻译",
+                f"来源 {localization.get('source', '—')}；"
+                f"同义词 {', '.join(localization.get('aliases') or []) or '—'}",
+            ])
     for platform, score in (run.platform_scores or {}).items():
         platform_score = score.get("score") if score.get("eligible", True) else "—"
         raw_sample = score.get("raw_sample_size", score.get("sample_size", 0))
@@ -93,6 +100,15 @@ def build_report(db: Session, run: AnalysisRun) -> BytesIO:
         ])
     for recommendation in analysis.get("recommendations", []):
         _append(summary, ["建议", recommendation])
+    ai = analysis.get("ai") or {}
+    if ai.get("status") == "completed":
+        _append(summary, ["AI 辅助解读", ai.get("summary") or "—"])
+        for finding in ai.get("findings") or []:
+            _append(summary, ["AI 观察", finding])
+        for risk in ai.get("risks") or []:
+            _append(summary, ["AI 风险", risk])
+        for action in ai.get("actions") or []:
+            _append(summary, ["AI 行动", action])
     summary.column_dimensions["A"].width = 22
     summary.column_dimensions["B"].width = 100
 
@@ -140,6 +156,7 @@ def build_report(db: Session, run: AnalysisRun) -> BytesIO:
     _append(notes, ["字段", "说明"])
     _append(notes, ["公开已售", "平台页面当时展示的累计/公开口径，不换算为日销量或月销量。"])
     _append(notes, ["机会分", "需求信号40%、进入门槛35%、价格空间25%的证据门槛启发式评分。"])
+    _append(notes, ["AI 辅助", "AI 只翻译严格同义词并解读已聚合的公开字段，不修改机会分、证据等级或规则结论；AI 失败时规则分析仍完整可用。"])
     _append(notes, ["证据等级", "A/B/C/D 综合平台评分可用性、数据完整度、采集健康度和相关样本量；D 不输出强结论。"])
     _append(notes, ["采集健康度", "独立判断 raw 搜索卡片到可解析商品的转换、样本覆盖和关键字段覆盖，用来区分市场弱与采集器异常。"])
     _append(notes, ["缺失值", "公开页面未提供的字段不会填0，也不会把剩余权重放大；证据不足时不输出强结论。"])

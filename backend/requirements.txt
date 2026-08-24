@@ -11,6 +11,7 @@ python-jose[cryptography]==3.3.0
 openpyxl==3.1.5
 bcrypt==4.0.1
 email-validator==2.3.0
+httpx==0.27.2
 tzdata==2025.2
 
 # 常驻 Google Chrome 调试协议客户端（由 uvicorn[standard] 一并提供）

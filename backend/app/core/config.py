@@ -62,9 +62,11 @@ class Settings(BaseSettings):
     DEFAULT_TIMEZONE: str = "Asia/Kuala_Lumpur"
 
     LLM_PROVIDER: str = ""
-    LLM_MODEL: str = "deepseek-chat"
+    LLM_MODEL: str = "gpt-5.6-sol"
     LLM_API_KEY: str = ""
-    LLM_BASE_URL: str = "https://api.deepseek.com"
+    LLM_BASE_URL: str = "https://api.openai.com"
+    LLM_REASONING_EFFORT: str = "low"
+    LLM_TIMEOUT_SECONDS: float = Field(default=45.0, ge=5.0, le=120.0)
 
     @field_validator("DATABASE_TYPE", mode="before")
     @classmethod

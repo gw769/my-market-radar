@@ -10,6 +10,7 @@ interface MarketplaceDefaults {
   daily_time: string;
   timezone: string;
   platforms: string[];
+  ai?: { enabled: boolean; model?: string | null; score_authority?: string };
 }
 
 const FALLBACK_DEFAULTS: MarketplaceDefaults = {
@@ -83,6 +84,7 @@ export default function Analyze() {
     <form onSubmit={submit} className="analysis-console panel">
       <div className="console-label"><Search size={18} /><span>商品关键词</span><b>01</b></div>
       <input className="keyword-input" autoFocus value={keyword} onChange={(e) => setKeyword(e.target.value)} placeholder="例如：water bottle、botol air、儿童保温杯" />
+      {defaults.ai?.enabled && <div className="ai-localization-note"><Zap size={16} /><span><strong>{defaults.ai.model}</strong> 会把关键词收窄翻译为马来西亚站搜索词；最终机会分仍由公开数据规则计算。</span></div>}
       <div className="platform-grid">
         {[{ id: "shopee", name: "Shopee Malaysia", tone: "orange" }, { id: "lazada", name: "Lazada Malaysia", tone: "blue" }].map((p) => <button type="button" key={p.id} onClick={() => toggle(p.id)} className={`platform-card ${p.tone} ${platforms.includes(p.id) ? "selected" : ""}`}><Store /><div><strong>{p.name}</strong><span>{platforms.includes(p.id) ? "已加入本次扫描" : "点击加入"}</span></div><i /></button>)}
       </div>

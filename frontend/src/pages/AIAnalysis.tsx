@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Activity, AlertCircle, ArrowRight, CheckCircle2, Gauge, LoaderCircle, RefreshCw, Sparkles } from "lucide-react";
 import { apiGet } from "@/lib/api";
 import { useKeywordSummaries } from "@/hooks/useKeywordSummaries";
-import type { OpportunitySegment, PlatformScore, Run } from "@/types";
+import type { AIInsight, KeywordLocalization, OpportunitySegment, PlatformScore, Run } from "@/types";
 
 const dimLabels: Record<string,string> = { demand: "需求信号", entry_ease: "进入可行性", price_room: "价格空间" };
 const RESULT_STATUSES = new Set(["completed", "partial"]);
@@ -94,6 +94,8 @@ export default function AIAnalysis() {
   const segments = (analysis.opportunity_segments || []) as OpportunitySegment[];
   const evidence = analysis.evidence || null;
   const collector = analysis.collector_health || null;
+  const aiInsight = (analysis.ai || null) as AIInsight | null;
+  const localization = (analysis.request_config?.localization || null) as KeywordLocalization | null;
   const showingOlderResult = Boolean(latestRun && stableRunId && latestRun.id !== stableRunId);
   const loading = keywordsLoading || runLoading || Boolean(stableRunId && loadedRunId !== stableRunId);
   const visibleRunError = loadedRunId === stableRunId ? runError : "";
@@ -136,9 +138,22 @@ export default function AIAnalysis() {
     {!loading && !pageError && run ? <>
       <section className="score-banner panel">
         <div className="score-orb"><span>机会分</span><strong>{run.opportunity_score ?? "—"}</strong><small>完整度 {run.confidence ?? 0}%</small></div>
-        <div><span className="eyebrow">VERDICT</span><h3>{run.verdict}</h3><p>{analysis.methodology}</p></div>
+        <div><span className="eyebrow">VERDICT</span><h3>{run.verdict}</h3><p>{analysis.methodology}</p>{localization && <small className="localized-query">实际搜索词：{localization.search_term} · 同义词 {localization.aliases.join(" / ")}</small>}</div>
         <Gauge />
       </section>
+
+      {aiInsight && <section className="panel ai-insight-panel">
+        <div className="panel-title"><div><span>BOUNDED AI INTERPRETATION</span><h3>AI 经营解读</h3></div><Sparkles /></div>
+        {aiInsight.status === "completed" ? <>
+          <p className="ai-insight-summary">{aiInsight.summary}</p>
+          <div className="ai-insight-grid">
+            <div><strong>公开信号</strong>{(aiInsight.findings || []).map((text) => <span key={text}>{text}</span>)}</div>
+            <div><strong>主要风险</strong>{(aiInsight.risks || []).map((text) => <span key={text}>{text}</span>)}</div>
+            <div><strong>验证动作</strong>{(aiInsight.actions || []).map((text) => <span key={text}>{text}</span>)}</div>
+          </div>
+          <div className="method-note"><AlertCircle /> {aiInsight.model} 只读取聚合公开字段；没有修改机会分、证据等级或规则结论。</div>
+        </> : <div className="method-note"><AlertCircle /> {aiInsight.message || "AI 解读暂不可用，规则分析仍然有效。"}</div>}
+      </section>}
 
       {(evidence || collector) && <section className="panel">
         <div className="panel-title"><div><span>DATA TRUST</span><h3>证据与采集健康度</h3></div><Gauge /></div>

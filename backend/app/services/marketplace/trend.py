@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy.orm import Session, load_only
 
 from app.models.marketplace import AnalysisRun, ListingSnapshot, TrackedKeyword
+from app.services.marketplace.query_localization import effective_localization
 from app.services.marketplace.scoring import relevance_score
 
 RESULT_STATUSES = ("completed", "partial")
@@ -83,12 +84,16 @@ def _summarize_rows(rows: list[dict[str, Any]], current_count: int, interval_hou
     }
 
 
-def _relevant_snapshot_rows(rows: list[ListingSnapshot], keyword: str) -> list[ListingSnapshot]:
+def _relevant_snapshot_rows(
+    rows: list[ListingSnapshot],
+    keyword: str,
+    relevance_aliases: list[str] | None = None,
+) -> list[ListingSnapshot]:
     if not keyword:
         return []
     return [
         row for row in rows
-        if relevance_score(keyword, str(row.title or "")) >= 0.6
+        if relevance_score(keyword, str(row.title or ""), relevance_aliases) >= 0.6
     ]
 
 
@@ -125,11 +130,23 @@ def build_keyword_trend(db: Session, keyword_id: int) -> dict[str, Any]:
 
     keyword_row = (
         db.query(TrackedKeyword)
-        .options(load_only(TrackedKeyword.id, TrackedKeyword.keyword, raiseload=True))
+        .options(
+            load_only(
+                TrackedKeyword.id,
+                TrackedKeyword.keyword,
+                TrackedKeyword.localization,
+                raiseload=True,
+            )
+        )
         .filter(TrackedKeyword.id == keyword_id)
         .first()
     )
     keyword_text = str(keyword_row.keyword if keyword_row else "")
+    localization = effective_localization(
+        keyword_text,
+        keyword_row.localization if keyword_row else None,
+    )
+    relevance_aliases = list(localization.get("aliases") or []) if localization else None
     current_run, previous_run = runs[0], runs[1]
     current_time = _run_time(current_run)
     previous_time = _run_time(previous_run)
@@ -157,6 +174,7 @@ def build_keyword_trend(db: Session, keyword_id: int) -> dict[str, Any]:
         .filter(ListingSnapshot.run_id == current_run.id)
         .all(),
         keyword_text,
+        relevance_aliases,
     )
     previous_rows = _relevant_snapshot_rows(
         db.query(ListingSnapshot)
@@ -176,6 +194,7 @@ def build_keyword_trend(db: Session, keyword_id: int) -> dict[str, Any]:
         .filter(ListingSnapshot.run_id == previous_run.id)
         .all(),
         keyword_text,
+        relevance_aliases,
     )
     previous_map = {(row.platform, row.item_id): row for row in previous_rows}
 

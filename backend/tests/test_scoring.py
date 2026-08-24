@@ -121,6 +121,31 @@ class ScoringTests(unittest.TestCase):
             with self.subTest(drift_title=title):
                 self.assertLess(relevance_score("指甲贴", title), 0.6)
 
+    def test_towel_localized_aliases_are_core_products(self):
+        for title in (
+            "Premium Cotton Towel 70x140cm",
+            "Tuala Microfiber Cepat Kering",
+            "Hotel Towels 600GSM",
+            "纯棉吸水毛巾",
+        ):
+            with self.subTest(title=title):
+                self.assertGreaterEqual(relevance_score("毛巾", title), 0.6)
+        result = score_platform(
+            samples(10, title="Cotton Towel Soft")
+            + samples(10, title="Tuala Microfiber Cepat Kering"),
+            keyword="毛巾",
+        )
+        self.assertTrue(result["eligible"])
+        self.assertEqual(result["sample_size"], 20)
+
+    def test_runtime_translation_aliases_do_not_change_keyword_contract(self):
+        title = "Kids Insulated Water Bottle 500ml"
+        self.assertLess(relevance_score("儿童保温杯", title), 0.6)
+        self.assertGreaterEqual(
+            relevance_score("儿童保温杯", title, ["kids insulated water bottle"]),
+            0.6,
+        )
+
     def test_nail_sticker_breakdown_keeps_aliases_but_rejects_drift_and_bundles(self):
         core_titles = [
             "Disney Nail Sticker Floral",
