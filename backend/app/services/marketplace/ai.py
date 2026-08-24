@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import math
 import re
+import time
 from datetime import datetime, timezone
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from urllib.parse import urlparse
 
 import httpx
@@ -24,6 +25,8 @@ _GENERIC_SEARCH_TERMS = {
 }
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 _NUMBER_RE = re.compile(r"(?<![\w.])\d+(?:\.\d+)?%?")
+_RETRYABLE_STATUS_CODES = {408, 425, 429}
+RetryCallback = Callable[[int, int, str], None]
 
 
 def ai_status() -> dict[str, Any]:
@@ -42,6 +45,7 @@ def ai_status() -> dict[str, Any]:
         "endpoint_host": parsed.hostname if parsed else None,
         "uses_structured_output": True,
         "score_authority": "deterministic_rules",
+        "max_retries": settings.LLM_MAX_RETRIES,
     }
 
 
@@ -64,6 +68,7 @@ def _chat_json(
     schema_name: str,
     schema: dict[str, Any],
     max_completion_tokens: int,
+    on_retry: RetryCallback | None = None,
 ) -> dict[str, Any]:
     settings = get_settings()
     status = ai_status()
@@ -93,34 +98,68 @@ def _chat_json(
         "Content-Type": "application/json",
     }
     timeout = httpx.Timeout(settings.LLM_TIMEOUT_SECONDS, connect=min(8.0, settings.LLM_TIMEOUT_SECONDS))
-    try:
-        with httpx.Client(timeout=timeout, follow_redirects=False) as client:
-            response = client.post(_endpoint("/v1/chat/completions"), headers=headers, json=payload)
-    except httpx.TimeoutException as exc:
-        raise MarketplaceAIError("AI 请求超时") from exc
-    except httpx.HTTPError as exc:
-        raise MarketplaceAIError("AI 服务连接失败") from exc
+    max_retries = settings.LLM_MAX_RETRIES
 
-    if response.status_code != 200:
-        logger.warning("AI 服务返回非 200: status=%s", response.status_code)
-        raise MarketplaceAIError(f"AI 服务返回 HTTP {response.status_code}")
-    try:
-        body = response.json()
-        choice = (body.get("choices") or [])[0]
-        message = choice.get("message") or {}
-        if message.get("refusal"):
-            raise MarketplaceAIError("AI 拒绝处理本次请求")
-        content = message.get("content")
-        if not isinstance(content, str) or not content.strip():
-            raise MarketplaceAIError("AI 没有返回结构化内容")
-        result = json.loads(content)
-    except MarketplaceAIError:
-        raise
-    except (IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise MarketplaceAIError("AI 返回格式不符合约定") from exc
-    if not isinstance(result, dict):
-        raise MarketplaceAIError("AI 返回格式不符合约定")
-    return result
+    def wait_before_retry(retry_number: int, reason: str) -> None:
+        logger.warning(
+            "AI 临时故障，自动重试 %s/%s: %s",
+            retry_number,
+            max_retries,
+            reason,
+        )
+        if on_retry:
+            on_retry(retry_number, max_retries, reason)
+        time.sleep(min(2 ** (retry_number - 1), 12))
+
+    with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+        for attempt in range(max_retries + 1):
+            try:
+                response = client.post(
+                    _endpoint("/v1/chat/completions"),
+                    headers=headers,
+                    json=payload,
+                )
+            except httpx.TimeoutException as exc:
+                if attempt >= max_retries:
+                    raise MarketplaceAIError("AI 请求超时，自动重试后仍未恢复") from exc
+                wait_before_retry(attempt + 1, "请求超时")
+                continue
+            except httpx.HTTPError as exc:
+                if attempt >= max_retries:
+                    raise MarketplaceAIError("AI 服务连接失败，自动重试后仍未恢复") from exc
+                wait_before_retry(attempt + 1, "连接失败")
+                continue
+
+            if response.status_code != 200:
+                retryable = (
+                    response.status_code in _RETRYABLE_STATUS_CODES
+                    or 500 <= response.status_code <= 599
+                )
+                if retryable and attempt < max_retries:
+                    wait_before_retry(attempt + 1, f"HTTP {response.status_code}")
+                    continue
+                logger.warning("AI 服务返回非 200: status=%s", response.status_code)
+                raise MarketplaceAIError(f"AI 服务返回 HTTP {response.status_code}")
+
+            try:
+                body = response.json()
+                choice = (body.get("choices") or [])[0]
+                message = choice.get("message") or {}
+                if message.get("refusal"):
+                    raise MarketplaceAIError("AI 拒绝处理本次请求")
+                content = message.get("content")
+                if not isinstance(content, str) or not content.strip():
+                    raise MarketplaceAIError("AI 没有返回结构化内容")
+                result = json.loads(content)
+            except MarketplaceAIError:
+                raise
+            except (IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise MarketplaceAIError("AI 返回格式不符合约定") from exc
+            if not isinstance(result, dict):
+                raise MarketplaceAIError("AI 返回格式不符合约定")
+            return result
+
+    raise MarketplaceAIError("AI 请求未完成")
 
 
 def _clean_phrase(value: Any) -> str:
@@ -145,7 +184,11 @@ def _unique_texts(values: Iterable[Any], *, limit: int, max_length: int) -> list
     return result
 
 
-def translate_keyword(keyword: str) -> dict[str, Any]:
+def translate_keyword(
+    keyword: str,
+    *,
+    on_retry: RetryCallback | None = None,
+) -> dict[str, Any]:
     source = " ".join(str(keyword or "").split()).strip()
     if len(source) < 2 or len(source) > 200 or _CONTROL_RE.search(source):
         raise MarketplaceAIError("关键词长度或字符不合法")
@@ -180,6 +223,7 @@ def translate_keyword(keyword: str) -> dict[str, Any]:
         schema_name="marketplace_keyword_localization",
         schema=schema,
         max_completion_tokens=320,
+        on_retry=on_retry,
     )
     search_term = _clean_phrase(result.get("search_term"))
     if not search_term or search_term in _GENERIC_SEARCH_TERMS:
@@ -256,7 +300,11 @@ def _unsupported_numbers(texts: Iterable[str], evidence: dict[str, Any]) -> list
     return sorted(number for number in claimed if number not in source_numbers)
 
 
-def generate_market_insights(analysis: dict[str, Any]) -> dict[str, Any]:
+def generate_market_insights(
+    analysis: dict[str, Any],
+    *,
+    on_retry: RetryCallback | None = None,
+) -> dict[str, Any]:
     evidence = _insight_evidence(analysis)
     schema = {
         "type": "object",
@@ -284,6 +332,7 @@ def generate_market_insights(analysis: dict[str, Any]) -> dict[str, Any]:
         schema_name="marketplace_ai_insight",
         schema=schema,
         max_completion_tokens=900,
+        on_retry=on_retry,
     )
     summary = _unique_texts([result.get("summary")], limit=1, max_length=360)
     findings = _unique_texts(result.get("findings") or [], limit=3, max_length=260)

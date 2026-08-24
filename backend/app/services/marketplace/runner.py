@@ -241,7 +241,15 @@ def _prepare_run_localization(run_id: int, worker_id: str) -> None:
         return
 
     try:
-        localization = translate_keyword(source_keyword)
+        localization = translate_keyword(
+            source_keyword,
+            on_retry=lambda retry, maximum, _reason: _require_lease(
+                run_id,
+                worker_id,
+                progress=5,
+                current_step=f"AI 翻译临时失败 · 自动重试 {retry}/{maximum}",
+            ),
+        )
     except MarketplaceAIError as exc:
         logger.warning("AI 关键词翻译失败，使用原词继续 run=%s: %s", run_id, exc)
         db = SessionLocal()
@@ -1599,7 +1607,15 @@ def execute_run_sync(run_id: int) -> None:
                 current_step="AI 解读公开数据证据",
             )
             try:
-                analysis["ai"] = generate_market_insights(analysis)
+                analysis["ai"] = generate_market_insights(
+                    analysis,
+                    on_retry=lambda retry, maximum, _reason: _require_lease(
+                        run_id,
+                        worker_id,
+                        progress=82,
+                        current_step=f"AI 解读临时失败 · 自动重试 {retry}/{maximum}",
+                    ),
+                )
             except MarketplaceAIError as exc:
                 logger.warning("AI 市场解读失败，保留规则结论 run=%s: %s", run_id, exc)
                 analysis["ai"] = {

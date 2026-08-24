@@ -3,6 +3,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import httpx
+
 from app.services.marketplace import ai
 
 
@@ -15,6 +17,7 @@ class MarketplaceAITests(unittest.TestCase):
             LLM_MODEL="gpt-5.6-sol",
             LLM_REASONING_EFFORT="low",
             LLM_TIMEOUT_SECONDS=20.0,
+            LLM_MAX_RETRIES=5,
         )
 
     def test_towel_uses_deterministic_translation_without_network(self):
@@ -68,6 +71,73 @@ class MarketplaceAITests(unittest.TestCase):
         headers = client.post.call_args.kwargs["headers"]
         self.assertEqual(headers["Authorization"], "Bearer secret-test-key")
         self.assertNotIn("secret-test-key", json.dumps(result))
+
+    def test_chat_json_retries_timeout_five_times_then_succeeds(self):
+        response = Mock(status_code=200)
+        response.json.return_value = {
+            "choices": [{"message": {"content": json.dumps({"value": "ok"})}}]
+        }
+        client = Mock()
+        client.__enter__ = Mock(return_value=client)
+        client.__exit__ = Mock(return_value=False)
+        client.post.side_effect = [
+            httpx.ReadTimeout("temporary timeout") for _ in range(5)
+        ] + [response]
+        callback = Mock()
+        schema = {
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+            "required": ["value"],
+            "additionalProperties": False,
+        }
+
+        with patch.object(ai, "get_settings", return_value=self.settings()), patch.object(
+            ai.httpx, "Client", return_value=client
+        ), patch.object(ai.time, "sleep") as sleep:
+            result = ai._chat_json(
+                system="system",
+                user="user",
+                schema_name="test_schema",
+                schema=schema,
+                max_completion_tokens=50,
+                on_retry=callback,
+            )
+
+        self.assertEqual(result, {"value": "ok"})
+        self.assertEqual(client.post.call_count, 6)
+        self.assertEqual(sleep.call_count, 5)
+        self.assertEqual(
+            [call.args[:2] for call in callback.call_args_list],
+            [(1, 5), (2, 5), (3, 5), (4, 5), (5, 5)],
+        )
+
+    def test_chat_json_does_not_retry_non_transient_auth_error(self):
+        response = Mock(status_code=401)
+        client = Mock()
+        client.__enter__ = Mock(return_value=client)
+        client.__exit__ = Mock(return_value=False)
+        client.post.return_value = response
+        schema = {
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+            "required": ["value"],
+            "additionalProperties": False,
+        }
+
+        with patch.object(ai, "get_settings", return_value=self.settings()), patch.object(
+            ai.httpx, "Client", return_value=client
+        ), patch.object(ai.time, "sleep") as sleep:
+            with self.assertRaisesRegex(ai.MarketplaceAIError, "HTTP 401"):
+                ai._chat_json(
+                    system="system",
+                    user="user",
+                    schema_name="test_schema",
+                    schema=schema,
+                    max_completion_tokens=50,
+                )
+
+        self.assertEqual(client.post.call_count, 1)
+        sleep.assert_not_called()
 
     def test_ai_insight_rejects_numbers_not_in_evidence(self):
         analysis = {

@@ -84,6 +84,7 @@ LLM_BASE_URL=https://your-openai-compatible-host
 LLM_MODEL=gpt-5.6-sol
 LLM_REASONING_EFFORT=low
 LLM_TIMEOUT_SECONDS=70
+LLM_MAX_RETRIES=5
 ```
 
 AI 只做两件事：把用户关键词收窄翻译成马来西亚站英文/马来文严格同义词；在分析完成后解读已经聚合的公开字段。翻译结果会按关键词缓存；API 不可用时自动使用原词继续。机会分、证据等级、平台结论和商品过滤始终由确定性规则生成，AI 无权修改，也不会接收站点登录信息或浏览器 Cookie。

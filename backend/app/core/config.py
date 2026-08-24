@@ -67,6 +67,9 @@ class Settings(BaseSettings):
     LLM_BASE_URL: str = "https://api.openai.com"
     LLM_REASONING_EFFORT: str = "low"
     LLM_TIMEOUT_SECONDS: float = Field(default=45.0, ge=5.0, le=120.0)
+    # Initial request plus at most five retries. Keep the upper bound explicit so a
+    # degraded upstream cannot hold a marketplace worker forever.
+    LLM_MAX_RETRIES: int = Field(default=5, ge=0, le=5)
 
     @field_validator("DATABASE_TYPE", mode="before")
     @classmethod
