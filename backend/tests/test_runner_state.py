@@ -822,7 +822,7 @@ class RunnerPageCollectionTests(unittest.IsolatedAsyncioTestCase):
     def test_page_wait_budgets_allow_cold_load_but_remain_bounded(self):
         self.assertEqual(runner._PAGE_MAX_SECONDS, 60.0)
         self.assertEqual(runner._PAGE_NAVIGATION_MAX_SECONDS, 12.0)
-        self.assertEqual(runner._PAGE_FIRST_RESULTS_MAX_SECONDS, 25.0)
+        self.assertEqual(runner._PAGE_FIRST_RESULTS_MAX_SECONDS, 35.0)
         self.assertEqual(runner._PAGE_TARGET_STABLE_ROUNDS, 4)
         self.assertEqual(runner._PAGE_BOTTOM_STABLE_ROUNDS, 4)
 

@@ -66,7 +66,7 @@ _EXTENSION_ATTACH_RETRY_SECONDS = 40.0
 _PAGE_POLL_INTERVAL_SECONDS = 0.8
 _PAGE_MAX_SECONDS = 60.0
 _PAGE_NAVIGATION_MAX_SECONDS = 12.0
-_PAGE_FIRST_RESULTS_MAX_SECONDS = 25.0
+_PAGE_FIRST_RESULTS_MAX_SECONDS = 35.0
 _PAGE_TARGET_STABLE_ROUNDS = 4
 _PAGE_BOTTOM_STABLE_ROUNDS = 4
 _PAGE_STATE_EXPRESSION = r"""(() => {
@@ -1107,7 +1107,9 @@ async def _collect_resident_tab(
                 # and is never added to this page's accumulator.
                 first_budget = min(
                     _PAGE_FIRST_RESULTS_MAX_SECONDS,
-                    max(3.0, page_window * 0.40),
+                    # Shopee may render sixty placeholders immediately but hydrate the first
+                    # fifteen real links only after twenty-plus seconds when Shopdora is active.
+                    max(3.0, page_window * 0.58),
                 )
                 first_deadline = min(page_deadline, time.monotonic() + first_budget)
                 stale_grid_seen = False
