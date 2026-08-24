@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Activity, AlertCircle, ArrowRight, CheckCircle2, Eye, Gauge, LoaderCircle, RefreshCw, Sparkles } from "lucide-react";
+import { Activity, AlertCircle, ArrowRight, CheckCircle2, Eye, Gauge, LoaderCircle, Puzzle, RefreshCw, Sparkles } from "lucide-react";
 import { apiGet } from "@/lib/api";
 import { useKeywordSummaries } from "@/hooks/useKeywordSummaries";
 import type { AIInsight, KeywordLocalization, OpportunitySegment, PlatformScore, Run } from "@/types";
@@ -94,6 +94,7 @@ export default function AIAnalysis() {
   const segments = (analysis.opportunity_segments || []) as OpportunitySegment[];
   const evidence = analysis.evidence || null;
   const collector = analysis.collector_health || null;
+  const shopdora = analysis.third_party?.shopdora || null;
   const aiInsight = (analysis.ai || null) as AIInsight | null;
   const aiNextSteps = aiInsight?.status === "completed" ? (aiInsight.next_steps || []) : [];
   const localization = (analysis.request_config?.localization || null) as KeywordLocalization | null;
@@ -152,8 +153,21 @@ export default function AIAnalysis() {
             <div><strong>主要风险</strong>{(aiInsight.risks || []).map((text) => <span key={text}>{text}</span>)}</div>
             <div><strong>验证动作</strong>{(aiInsight.actions || []).map((text) => <span key={text}>{text}</span>)}</div>
           </div>
-          <div className="method-note"><AlertCircle /> {aiInsight.model} 只读取聚合公开字段；没有修改机会分、证据等级或规则结论。</div>
+          <div className="method-note"><AlertCircle /> {aiInsight.model} 只读取聚合公开字段{shopdora ? "及明确标注的 Shopdora 第三方估算" : ""}；没有修改机会分、证据等级或规则结论。</div>
         </> : <div className="method-note"><AlertCircle /> {aiInsight.message || "AI 解读暂不可用，规则分析仍然有效。"}</div>}
+      </section>}
+
+      {shopdora && <section className="panel third-party-panel">
+        <div className="panel-title"><div><span>OPTIONAL BROWSER ENRICHMENT</span><h3>Shopdora 插件增强</h3></div><Puzzle /></div>
+        <div className="third-party-source"><strong>{shopdora.sample_size}/{shopdora.snapshot_sample_size} 条 Shopee 商品已增强</strong><span>免费套餐只覆盖部分搜索卡；下列月销量、销售额、GMV 和增长率均为第三方估算。</span></div>
+        <div className="stat-grid">
+          <article className="stat-card"><span>近30日销量中位估算</span><strong>{shopdora.metrics?.median_sales_30d ?? "—"}</strong><small>覆盖 {shopdora.coverage?.sales_30d ?? 0}%</small></article>
+          <article className="stat-card"><span>近30日增长中位估算</span><strong>{shopdora.metrics?.median_sales_30d_growth_percent == null ? "—" : `${shopdora.metrics.median_sales_30d_growth_percent}%`}</strong><small>正负增长都保留</small></article>
+          <article className="stat-card"><span>近30日销售额中位估算</span><strong>{shopdora.metrics?.median_revenue_30d_myr == null ? "—" : `RM ${shopdora.metrics.median_revenue_30d_myr.toLocaleString()}`}</strong><small>不等于利润</small></article>
+          <article className="stat-card"><span>本土店占比</span><strong>{shopdora.local_seller_share == null ? "—" : `${shopdora.local_seller_share}%`}</strong><small>仅插件已增强样本</small></article>
+        </div>
+        {shopdora.top_categories?.length > 0 && <div className="third-party-categories">{shopdora.top_categories.map((entry: any) => <span key={entry.category}>{entry.category}<b>{entry.count}</b></span>)}</div>}
+        <div className="method-note"><AlertCircle /> 这些字段作为 AI 的辅助上下文，但不会覆盖平台公开字段，也不参与确定性机会分。</div>
       </section>}
 
       {(evidence || collector) && <section className="panel">

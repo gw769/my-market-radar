@@ -344,6 +344,7 @@ def get_items(
         ListingSnapshot.raw_data["search_page"].as_integer().label("search_page"),
         ListingSnapshot.raw_data["page_rank"].as_integer().label("page_rank"),
         ListingSnapshot.raw_data["page_size"].as_integer().label("page_size"),
+        ListingSnapshot.raw_data["shopdora"].label("shopdora"),
         ListingSnapshot.data_quality,
         ListingSnapshot.collected_at,
     ).filter(*filters)
@@ -364,6 +365,7 @@ def get_items(
         "search_page": row.search_page,
         "page_rank": row.page_rank,
         "page_size": row.page_size,
+        "shopdora": row.shopdora if isinstance(row.shopdora, dict) else None,
         "data_quality": row.data_quality, "collected_at": _iso(row.collected_at),
     } for row in rows]
     response = {"success": True, "data": data}

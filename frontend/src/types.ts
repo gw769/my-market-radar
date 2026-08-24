@@ -49,11 +49,21 @@ export interface Keyword {
   last_run_at?: string; last_success_at?: string; next_run_at?: string;
   latest_run?: RunSummary | null; latest_result_run?: RunSummary | null;
 }
+export interface ShopdoraEnrichment {
+  provider: "Shopdora" | string; source: string; estimated: true; item_id: string;
+  seller_name?: string | null; seller_type?: string | null; brand?: string | null;
+  category_path?: string | null; category_monthly_sales_rank?: number | null;
+  listed_at?: string | null; listing_age_days?: number | null; like_count?: number | null;
+  sales_1d?: number | null; sales_7d?: number | null; sales_30d?: number | null;
+  sales_30d_growth_percent?: number | null; revenue_30d_myr?: number | null;
+  total_sales_estimate?: number | null; gmv_estimate_myr?: number | null;
+}
 export interface Listing {
   id: number; platform: string; item_id: string; title: string; product_url: string; image_url?: string;
   price?: number | null; original_price?: number | null; discount_percent?: number | null;
   sold_count?: number | null; rating?: number | null; review_count?: number | null;
   seller_name?: string; seller_location?: string; is_sponsored?: boolean | null;
   search_rank: number; search_page?: number | null; page_rank?: number | null; page_size?: number | null;
+  shopdora?: ShopdoraEnrichment | null;
   data_quality: number; collected_at?: string;
 }

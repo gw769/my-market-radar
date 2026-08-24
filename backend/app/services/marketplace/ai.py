@@ -299,6 +299,35 @@ def _insight_evidence(analysis: dict[str, Any]) -> dict[str, Any]:
         if isinstance(item, dict)
     ]
     evidence = analysis.get("evidence") if isinstance(analysis.get("evidence"), dict) else {}
+    third_party = analysis.get("third_party") if isinstance(analysis.get("third_party"), dict) else {}
+    shopdora = third_party.get("shopdora") if isinstance(third_party.get("shopdora"), dict) else None
+    shopdora_evidence = None
+    if shopdora:
+        shopdora_evidence = {
+            "provider": "Shopdora",
+            "platform": "shopee",
+            "estimated": True,
+            "sample_size": _compact_number(shopdora.get("sample_size")),
+            "snapshot_sample_size": _compact_number(shopdora.get("snapshot_sample_size")),
+            "coverage": {
+                key: _compact_number(value)
+                for key, value in (shopdora.get("coverage") or {}).items()
+            },
+            "metrics": {
+                key: _compact_number(value)
+                for key, value in (shopdora.get("metrics") or {}).items()
+            },
+            "local_seller_share": _compact_number(shopdora.get("local_seller_share")),
+            "top_categories": [
+                {
+                    "category": str(item.get("category") or "")[:160],
+                    "count": _compact_number(item.get("count")),
+                }
+                for item in (shopdora.get("top_categories") or [])[:3]
+                if isinstance(item, dict) and item.get("category")
+            ],
+            "scope_note": "third-party browser-extension estimates; not used by deterministic score",
+        }
     return {
         "keyword": analysis.get("keyword"),
         "opportunity_score": _compact_number(analysis.get("opportunity_score")),
@@ -310,6 +339,7 @@ def _insight_evidence(analysis: dict[str, Any]) -> dict[str, Any]:
         "sample_total": _compact_number(evidence.get("sample_total")),
         "platforms": platforms,
         "top_segments": segments,
+        "third_party_estimates": {"shopdora": shopdora_evidence} if shopdora_evidence else {},
         "rule_observations": _unique_texts(
             analysis.get("recommendations") or [],
             limit=6,
@@ -371,7 +401,9 @@ def generate_market_insights(
             "or evidence signals; state one concrete compound task and what the operator should record. "
             "Use no digits and no written-number quantities or durations anywhere in next_steps. Never invent time periods, "
             "budgets, quantities, MOQ, targets, or thresholds. When cost, conversion, refund, or margin "
-            "data is absent, instruct the operator to measure it instead of estimating it. Never compare "
+            "data is absent, instruct the operator to measure it instead of estimating it. Treat any "
+            "third_party_estimates as labeled estimates only: never call them platform truth and never use "
+            "them to override the deterministic score. Never compare "
             "sold counts directly across platforms. Avoid generic advice that could fit any product."
         ),
         user=(
@@ -428,5 +460,9 @@ def generate_market_insights(
         "actions": actions,
         "next_steps": next_steps,
         "score_changed": False,
-        "evidence_scope": "aggregated_public_fields_only",
+        "evidence_scope": (
+            "aggregated_public_fields_plus_labeled_third_party_estimates"
+            if evidence.get("third_party_estimates")
+            else "aggregated_public_fields_only"
+        ),
     }

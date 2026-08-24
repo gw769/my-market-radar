@@ -28,6 +28,10 @@ def _append(ws, values) -> None:
     ws.append([_excel_safe(value) for value in values])
 
 
+def _dash(value):
+    return "—" if value is None or value == "" else value
+
+
 def _header(ws, labels: list[str]) -> None:
     _append(ws, labels)
     for cell in ws[1]:
@@ -98,6 +102,15 @@ def build_report(db: Session, run: AnalysisRun) -> BytesIO:
             f"{health.get('status', 'unknown')}；健康度 {health.get('health_score', 0)}%；"
             f"raw {health.get('raw_count', 0)} → parsed {health.get('parsed_count', 0)}；{warnings}",
         ])
+    shopdora_summary = ((analysis.get("third_party") or {}).get("shopdora") or {})
+    if shopdora_summary:
+        metrics = shopdora_summary.get("metrics") or {}
+        _append(summary, [
+            "Shopdora 插件增强",
+            f"覆盖 {shopdora_summary.get('sample_size', 0)}/{shopdora_summary.get('snapshot_sample_size', 0)} 条 Shopee 商品；"
+            f"近30日销量中位估算 {metrics.get('median_sales_30d', '—')}；"
+            "第三方估算，不参与规则机会分。",
+        ])
     ai = analysis.get("ai") or {}
     if ai.get("status") == "completed":
         _append(summary, ["AI 辅助解读", ai.get("summary") or "—"])
@@ -123,11 +136,18 @@ def build_report(db: Session, run: AnalysisRun) -> BytesIO:
     summary.column_dimensions["A"].width = 22
     summary.column_dimensions["B"].width = 100
 
-    columns = ["平台位次", "页码", "页内位次", "商品", "价格(MYR)", "原价(MYR)", "折扣(%)", "公开已售", "评分", "评论数", "店铺", "地区", "广告", "链接", "采集时间"]
+    columns = [
+        "平台位次", "页码", "页内位次", "商品", "价格(MYR)", "原价(MYR)", "折扣(%)",
+        "公开已售", "评分", "评论数", "店铺", "地区", "广告", "链接", "采集时间",
+        "增强来源", "近30日销量估算", "近30日销量增长(%)", "近30日销售额估算(MYR)",
+        "总销量估算", "GMV估算(MYR)", "插件卖家", "店铺类型", "品牌", "类目",
+        "类目月销排名", "上架日期", "上架天数", "点赞数",
+    ]
     for platform in ("shopee", "lazada"):
         ws = wb.create_sheet(f"{platform.title()}竞品")
         _header(ws, columns)
         for item in [row for row in rows if row.platform == platform]:
+            shopdora = ((item.raw_data or {}).get("shopdora") or {})
             _append(ws, [
                 item.search_rank,
                 (item.raw_data or {}).get("search_page", "—"),
@@ -141,12 +161,29 @@ def build_report(db: Session, run: AnalysisRun) -> BytesIO:
                 item.seller_name or "—", item.seller_location or "—",
                 "是" if item.is_sponsored is True else "否" if item.is_sponsored is False else "—",
                 item.product_url, item.collected_at.isoformat() if item.collected_at else "—",
+                "Shopdora · 第三方估算" if shopdora else "—",
+                _dash(shopdora.get("sales_30d")),
+                _dash(shopdora.get("sales_30d_growth_percent")),
+                _dash(shopdora.get("revenue_30d_myr")),
+                _dash(shopdora.get("total_sales_estimate")),
+                _dash(shopdora.get("gmv_estimate_myr")),
+                _dash(shopdora.get("seller_name")),
+                _dash(shopdora.get("seller_type")),
+                _dash(shopdora.get("brand")),
+                _dash(shopdora.get("category_path")),
+                _dash(shopdora.get("category_monthly_sales_rank")),
+                _dash(shopdora.get("listed_at")),
+                _dash(shopdora.get("listing_age_days")),
+                _dash(shopdora.get("like_count")),
             ])
         ws.column_dimensions["A"].width = 12
         ws.column_dimensions["B"].width = 8
         ws.column_dimensions["C"].width = 12
         ws.column_dimensions["D"].width = 55
         ws.column_dimensions["N"].width = 55
+        ws.column_dimensions["P"].width = 24
+        ws.column_dimensions["V"].width = 28
+        ws.column_dimensions["Y"].width = 48
 
     trend = wb.create_sheet("每日价格与排名趋势")
     _header(trend, ["采集时间", "平台", "商品ID", "商品", "价格(MYR)", "公开已售", "评论数", "平台位次", "页码", "页内位次"])
@@ -166,8 +203,9 @@ def build_report(db: Session, run: AnalysisRun) -> BytesIO:
     notes = wb.create_sheet("数据口径说明")
     _append(notes, ["字段", "说明"])
     _append(notes, ["公开已售", "平台页面当时展示的累计/公开口径，不换算为日销量或月销量。"])
+    _append(notes, ["Shopdora 插件增强", "仅在用户 Chrome 已安装并加载 Shopdora 时记录；月销量、销售额、GMV、增长等均按第三方估算字段展示，不覆盖平台公开字段，也不参与规则机会分。免费套餐可能只覆盖当前页部分商品。"])
     _append(notes, ["机会分", "需求信号40%、进入门槛35%、价格空间25%的证据门槛启发式评分。"])
-    _append(notes, ["AI 辅助", "AI 只翻译严格同义词并解读已聚合的公开字段，不修改机会分、证据等级或规则结论；AI 失败时规则分析仍完整可用。"])
+    _append(notes, ["AI 辅助", "AI 只翻译严格同义词并解读已聚合的公开字段及明确标注的第三方估算，不修改机会分、证据等级或规则结论；AI 失败时规则分析仍完整可用。"])
     _append(notes, ["证据等级", "A/B/C/D 综合平台评分可用性、数据完整度、采集健康度和相关样本量；D 不输出强结论。"])
     _append(notes, ["采集健康度", "独立判断 raw 搜索卡片到可解析商品的转换、样本覆盖和关键字段覆盖，用来区分市场弱与采集器异常。"])
     _append(notes, ["缺失值", "公开页面未提供的字段不会填0，也不会把剩余权重放大；证据不足时不输出强结论。"])

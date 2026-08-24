@@ -75,6 +75,11 @@ class SnapshotAndReportTests(unittest.TestCase):
                 "max_results_per_platform": 60,
             },
             "recommendations": ["先小批量测试。"],
+            "third_party": {"shopdora": {
+                "sample_size": 1,
+                "snapshot_sample_size": 1,
+                "metrics": {"median_sales_30d": 916},
+            }},
             "ai": {
                 "status": "completed",
                 "summary": "先验证公开信号。",
@@ -94,6 +99,24 @@ class SnapshotAndReportTests(unittest.TestCase):
             run_id=run.id, keyword_id=self.keyword_id, platform="lazada", item_id="l1",
             title="Bottle", product_url="https://example.test/l1", price=20, search_rank=24,
             data_quality=0.5, raw_data={"search_page": 2, "page_rank": 4, "page_size": 20},
+        ))
+        db.add(ListingSnapshot(
+            run_id=run.id, keyword_id=self.keyword_id, platform="shopee", item_id="s1",
+            title="Towel", product_url="https://example.test/s1", price=2.8, search_rank=1,
+            raw_data={
+                "search_page": 1,
+                "page_rank": 1,
+                "page_size": 20,
+                "shopdora": {
+                    "provider": "Shopdora", "estimated": True,
+                    "sales_30d": 916, "sales_30d_growth_percent": 33.28,
+                    "revenue_30d_myr": 2564.8, "total_sales_estimate": 27380,
+                    "gmv_estimate_myr": 76664.0, "seller_name": "Simplico",
+                    "seller_type": "本土", "brand": None, "category_path": "家居-毛巾",
+                    "category_monthly_sales_rank": 48, "listed_at": "2022-08-15",
+                    "listing_age_days": 1470, "like_count": 484,
+                },
+            },
         ))
         db.commit()
         output = build_report(db, run)
@@ -116,6 +139,14 @@ class SnapshotAndReportTests(unittest.TestCase):
         self.assertIn("AI 路线 1 · 先核验", summary_labels)
         self.assertIn("复盘观察项", summary_labels)
         self.assertIn("规则评分依据", summary_labels)
+        self.assertIn("Shopdora 插件增强", summary_labels)
+        shopee = workbook["Shopee竞品"]
+        self.assertEqual(shopee.cell(2, 16).value, "Shopdora · 第三方估算")
+        self.assertEqual(shopee.cell(2, 17).value, 916)
+        self.assertEqual(shopee.cell(2, 19).value, 2564.8)
+        self.assertEqual(shopee.cell(2, 25).value, "家居-毛巾")
+        notes = [row[0].value for row in workbook["数据口径说明"].iter_rows(min_row=2)]
+        self.assertIn("Shopdora 插件增强", notes)
         trend = workbook["每日价格与排名趋势"]
         self.assertEqual(trend.cell(2, 8).value, 24)
         self.assertEqual(trend.cell(2, 9).value, 2)

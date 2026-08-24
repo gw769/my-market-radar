@@ -50,6 +50,7 @@ from app.services.marketplace.query_localization import (
     relevance_phrases,
 )
 from app.services.marketplace.scoring import build_analysis
+from app.services.marketplace.third_party import summarize_shopdora
 
 settings = get_settings()
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="marketplace-collector")
@@ -799,6 +800,18 @@ def _card_grid_signature(
     )
 
 
+def _shopdora_enrichment_state(cards: list[dict[str, Any]]) -> tuple[bool, int]:
+    detected = any(bool(card.get("shopdora_plugin_present")) for card in cards)
+    enriched = sum(
+        1
+        for card in cards
+        if isinstance(card.get("shopdora"), dict)
+        and isinstance(card["shopdora"].get("fields"), dict)
+        and bool(card["shopdora"]["fields"])
+    )
+    return detected, enriched
+
+
 def _positive_int(value: Any, fallback: int) -> int:
     try:
         parsed = int(value)
@@ -960,6 +973,7 @@ async def _collect_resident_tab(
             navigation_confirmed = False
             new_document_confirmed = False
             first_results_ready = False
+            enrichment_wait_deadline = page_started
             completion_reason = ""
             diagnostic: dict[str, Any] = {
                 "page": page_number,
@@ -1128,6 +1142,11 @@ async def _collect_resident_tab(
                         raise RuntimeError("商品网格未从上一页刷新")
                     raise RuntimeError("页面在限定时间内未挂载可解析商品网格")
 
+                # Shopdora is optional. If its overlay is detected, give its per-card request a
+                # small bounded grace window before declaring the native grid stable. Runs without
+                # the plugin do not wait, and plugin failure can never fail the platform collection.
+                enrichment_wait_deadline = min(page_deadline, time.monotonic() + 6.0)
+
                 # Phase 3: scroll the virtual list and only finish after either the requested
                 # count or the bottom-of-page DOM has remained unchanged for several polls.
                 previous_signature: tuple[Any, ...] | None = None
@@ -1140,8 +1159,15 @@ async def _collect_resident_tab(
                     previous_signature = signature
                     at_bottom = bool(page_state.get("atBottom"))
                     page_visible = page_state.get("visibilityState") == "visible"
+                    enrichment_detected, enrichment_count = _shopdora_enrichment_state(current_cards)
+                    enrichment_pending = (
+                        enrichment_detected
+                        and enrichment_count == 0
+                        and time.monotonic() < enrichment_wait_deadline
+                    )
                     if (
                         page_visible
+                        and not enrichment_pending
                         and usable_count >= limit
                         and stable_rounds >= _PAGE_TARGET_STABLE_ROUNDS
                     ):
@@ -1149,6 +1175,7 @@ async def _collect_resident_tab(
                         break
                     if (
                         page_visible
+                        and not enrichment_pending
                         and at_bottom
                         and usable_count > 0
                         and stable_rounds >= _PAGE_BOTTOM_STABLE_ROUNDS
@@ -1228,6 +1255,7 @@ async def _collect_resident_tab(
             page_cards = page_raw.cards()
             all_raw.add(page_cards)
             page_listings = adapter.parse_cards(page_cards, limit)
+            shopdora_detected, shopdora_enriched_count = _shopdora_enrichment_state(page_cards)
             diagnostic.update(
                 {
                     "final_url": current_url,
@@ -1242,6 +1270,8 @@ async def _collect_resident_tab(
                     "completion_reason": completion_reason,
                     "raw_count": len(page_cards),
                     "parsed_count": len(page_listings),
+                    "shopdora_detected": shopdora_detected,
+                    "shopdora_enriched_count": shopdora_enriched_count,
                     "ready_state": str(page_state.get("readyState") or ""),
                     "visibility_state": str(page_state.get("visibilityState") or ""),
                 }
@@ -1597,6 +1627,9 @@ def execute_run_sync(run_id: int) -> None:
         )
         analysis["collector_health"] = collector_health
         analysis["evidence"] = evidence
+        shopdora_summary = summarize_shopdora(collected)
+        if shopdora_summary:
+            analysis["third_party"] = {"shopdora": shopdora_summary}
         _apply_evidence_gate(analysis, evidence)
 
         if ai_status()["enabled"]:

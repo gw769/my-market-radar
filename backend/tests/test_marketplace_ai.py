@@ -217,6 +217,30 @@ class MarketplaceAITests(unittest.TestCase):
         self.assertFalse(result["score_changed"])
         self.assertEqual(analysis["opportunity_score"], 66.5)
 
+    def test_ai_evidence_labels_shopdora_numbers_as_third_party_estimates(self):
+        evidence = ai._insight_evidence({
+            "keyword": "毛巾",
+            "opportunity_score": 60,
+            "verdict": "谨慎观察",
+            "confidence": 80,
+            "evidence": {"grade": "B"},
+            "platform_scores": {},
+            "third_party": {"shopdora": {
+                "sample_size": 15,
+                "snapshot_sample_size": 60,
+                "coverage": {"sales_30d": 100.0},
+                "metrics": {"median_sales_30d": 384.0},
+                "local_seller_share": 100.0,
+                "top_categories": [{"category": "家居-毛巾", "count": 12}],
+            }},
+        })
+
+        shopdora = evidence["third_party_estimates"]["shopdora"]
+        self.assertTrue(shopdora["estimated"])
+        self.assertEqual(shopdora["sample_size"], 15)
+        self.assertEqual(shopdora["metrics"]["median_sales_30d"], 384)
+        self.assertIn("not used by deterministic score", shopdora["scope_note"])
+
 
 if __name__ == "__main__":
     unittest.main()

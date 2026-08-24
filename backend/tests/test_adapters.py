@@ -5,6 +5,7 @@ from pathlib import Path
 from app.services.marketplace.adapters import (
     LazadaMalaysiaAdapter,
     ShopeeMalaysiaAdapter,
+    normalize_shopdora_data,
     parse_compact_count,
     parse_money,
     parse_money_range,
@@ -109,6 +110,72 @@ class AdapterTests(unittest.TestCase):
         self.assertIn("card.querySelector('a[href*=\"-i.\"]')", script)
         self.assertNotIn("document.querySelectorAll('a[href*=\"-i.\"]')", script)
         self.assertIn("page_position: pageIndex + 1, page_size: pageSize", script)
+
+    def test_shopee_extraction_separates_shopdora_overlay_from_native_card_text(self):
+        script = ShopeeMalaysiaAdapter().extraction_script
+        self.assertIn("#shopdora-list[data-itemid]", script)
+        self.assertIn("shopdoraTextBlocks.reduce", script)
+        self.assertIn(".shopdoraPirceList", script)
+        self.assertIn("pendingShopdoraLabel", script)
+        self.assertIn("shopdora_plugin_present", script)
+        self.assertIn("shopdora};", script)
+
+    def test_shopdora_overlay_is_normalized_as_labeled_third_party_estimate(self):
+        raw_overlay = {
+            "item_id": "15091238410",
+            "seller_type": "本土",
+            "fields": {
+                " I D:": "15091238410",
+                "卖家:": "Simplico Official Store\n本土",
+                "品牌:": "无",
+                "类目:": "家居生活-浴室-毛巾与浴袍-毛巾与手巾\n(月销量排名48)",
+                "上架时间:": "2022-08-15\n(1470天)",
+                "点赞数:": "484",
+                "近1日/7日销量:": "-/-",
+                "近30日销量:": "916",
+                "近30日销量增长率:": "+33.28%",
+                "近30日销售额:": "RM2564.80",
+                "总销量:": "27380",
+                "GMV:": "RM76664.00",
+            },
+        }
+        normalized = normalize_shopdora_data(raw_overlay, "15091238410")
+
+        self.assertEqual(normalized["provider"], "Shopdora")
+        self.assertTrue(normalized["estimated"])
+        self.assertEqual(normalized["seller_name"], "Simplico Official Store")
+        self.assertEqual(normalized["seller_type"], "本土")
+        self.assertIsNone(normalized["brand"])
+        self.assertEqual(normalized["category_monthly_sales_rank"], 48)
+        self.assertEqual(normalized["listed_at"], "2022-08-15")
+        self.assertEqual(normalized["listing_age_days"], 1470)
+        self.assertEqual(normalized["sales_30d"], 916)
+        self.assertEqual(normalized["sales_30d_growth_percent"], 33.28)
+        self.assertEqual(normalized["revenue_30d_myr"], 2564.8)
+        self.assertEqual(normalized["total_sales_estimate"], 27380)
+        self.assertEqual(normalized["gmv_estimate_myr"], 76664.0)
+
+        listing = ShopeeMalaysiaAdapter().parse_card({
+            "href": "https://shopee.com.my/towel-i.184638876.15091238410",
+            "item_id": "15091238410",
+            "shop_id": "184638876",
+            "title": "Cotton Face Towel",
+            "text": "Cotton Face Towel\nRM 2.80\n4.8\n已售出2万+件\nSelangor",
+            "price": "RM 2.80",
+            "sold": "已售出2万+件",
+            "rating": "4.8",
+            "location": "Selangor",
+            "shopdora": raw_overlay,
+        }, 1)
+        self.assertEqual(listing.sold_count, 20_000)
+        self.assertEqual(listing.raw_data["shopdora"]["sales_30d"], 916)
+        self.assertIsNone(listing.seller_name)
+
+    def test_shopdora_overlay_with_wrong_item_id_is_rejected(self):
+        self.assertIsNone(normalize_shopdora_data({
+            "item_id": "wrong",
+            "fields": {"近30日销量:": "999"},
+        }, "expected"))
 
     def test_extraction_scripts_recognize_chinese_ad_labels(self):
         for adapter in (ShopeeMalaysiaAdapter(), LazadaMalaysiaAdapter()):

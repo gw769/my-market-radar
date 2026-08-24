@@ -90,6 +90,16 @@ class RunnerStateTests(unittest.TestCase):
         runner._requeue_requested.clear()
         self.engine.dispose()
 
+    def test_shopdora_enrichment_state_is_optional_and_requires_real_fields(self):
+        self.assertEqual(runner._shopdora_enrichment_state([]), (False, 0))
+        self.assertEqual(runner._shopdora_enrichment_state([
+            {"shopdora_plugin_present": True, "shopdora": {"fields": {}}},
+        ]), (True, 0))
+        self.assertEqual(runner._shopdora_enrichment_state([
+            {"shopdora_plugin_present": True, "shopdora": {"fields": {"近30日销量:": "916"}}},
+            {"shopdora_plugin_present": True, "shopdora": None},
+        ]), (True, 1))
+
     def test_run_captures_request_settings_at_creation(self):
         db = self.Session()
         keyword = db.query(TrackedKeyword).filter_by(id=self.keyword_id).one()
@@ -492,7 +502,16 @@ class RunnerStateTests(unittest.TestCase):
             title="Nail Sticker",
             product_url="https://shopee.com.my/nail-sticker-i.1001.5001",
             search_rank=24,
-            raw_data={"search_page": 2, "page_rank": 4, "page_size": 20},
+            raw_data={
+                "search_page": 2,
+                "page_rank": 4,
+                "page_size": 20,
+                "shopdora": {
+                    "provider": "Shopdora",
+                    "estimated": True,
+                    "sales_30d": 916,
+                },
+            },
         ))
         db.commit()
         user = db.query(User).filter_by(id=self.user_id).one()
@@ -503,6 +522,8 @@ class RunnerStateTests(unittest.TestCase):
         self.assertEqual(item["search_page"], 2)
         self.assertEqual(item["page_rank"], 4)
         self.assertEqual(item["page_size"], 20)
+        self.assertEqual(item["shopdora"]["provider"], "Shopdora")
+        self.assertEqual(item["shopdora"]["sales_30d"], 916)
         db.close()
 
     def test_items_api_paginates_filters_and_hides_inline_images(self):

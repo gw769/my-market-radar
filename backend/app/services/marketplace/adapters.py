@@ -179,6 +179,107 @@ _SOLD_PATTERNS = (
 )
 
 
+def _shopdora_number(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    match = re.search(r"[-+]?\d+(?:\.\d+)?", str(value).replace(",", ""))
+    return float(match.group(0)) if match else None
+
+
+def _shopdora_text(value: Any, *, maximum: int = 500) -> str | None:
+    if value in (None, ""):
+        return None
+    text = " ".join(str(value).split()).strip()
+    return text[:maximum] if text and text not in {"-", "—", "-/-"} else None
+
+
+def normalize_shopdora_data(value: Any, expected_item_id: str) -> dict[str, Any] | None:
+    """Normalize optional Shopdora DOM while keeping its estimates separate from platform data."""
+    if not isinstance(value, dict):
+        return None
+    item_id = _shopdora_text(value.get("item_id"), maximum=100)
+    if item_id and item_id != str(expected_item_id):
+        return None
+    fields = value.get("fields")
+    if not isinstance(fields, dict):
+        fields = {}
+    normalized_fields = {
+        re.sub(r"[\s:：]+", "", str(label)).casefold(): raw_value
+        for label, raw_value in fields.items()
+        if label not in (None, "")
+    }
+
+    def field(*labels: str) -> Any:
+        for label in labels:
+            found = normalized_fields.get(re.sub(r"[\s:：]+", "", label).casefold())
+            if found not in (None, ""):
+                return found
+        return None
+
+    seller = _shopdora_text(field("卖家", "seller"), maximum=300)
+    seller_type = _shopdora_text(value.get("seller_type"), maximum=80)
+    if seller and seller_type and seller.endswith(f" {seller_type}"):
+        seller = seller[: -(len(seller_type) + 1)].strip() or None
+    brand = _shopdora_text(field("品牌", "brand"), maximum=200)
+    if brand in {"无", "none", "n/a", "N/A"}:
+        brand = None
+
+    category_value = _shopdora_text(field("类目", "category"), maximum=700)
+    category_rank = None
+    category_path = category_value
+    if category_value:
+        rank_match = re.search(r"月销量排名\s*([0-9,]+)", category_value)
+        if rank_match:
+            category_rank = int(rank_match.group(1).replace(",", ""))
+        category_path = re.sub(r"\s*\(?月销量排名\s*[0-9,]+\)?\s*", "", category_value).strip() or None
+
+    listed_value = _shopdora_text(field("上架时间", "listed at", "listing date"), maximum=180)
+    listed_at = None
+    listing_age_days = None
+    if listed_value:
+        date_match = re.search(r"\b(20\d{2}-[01]\d-[0-3]\d)\b", listed_value)
+        age_match = re.search(r"\(?([0-9,]+)\s*天\)?", listed_value)
+        listed_at = date_match.group(1) if date_match else None
+        listing_age_days = int(age_match.group(1).replace(",", "")) if age_match else None
+
+    one_seven = _shopdora_text(field("近1日/7日销量", "1d/7d sales"), maximum=120)
+    sales_1d = sales_7d = None
+    if one_seven and "/" in one_seven:
+        left, right = one_seven.split("/", 1)
+        sales_1d = parse_compact_count(left)
+        sales_7d = parse_compact_count(right)
+
+    growth = _shopdora_number(field("近30日销量增长率", "30d sales growth"))
+    result: dict[str, Any] = {
+        "provider": "Shopdora",
+        "source": "browser_extension_dom",
+        "estimated": True,
+        "item_id": item_id or str(expected_item_id),
+        "seller_name": seller,
+        "seller_type": seller_type,
+        "brand": brand,
+        "category_path": category_path,
+        "category_monthly_sales_rank": category_rank,
+        "listed_at": listed_at,
+        "listing_age_days": listing_age_days,
+        "like_count": parse_compact_count(field("点赞数", "likes")),
+        "sales_1d": sales_1d,
+        "sales_7d": sales_7d,
+        "sales_30d": parse_compact_count(field("近30日销量", "30d sales")),
+        "sales_30d_growth_percent": round(growth, 2) if growth is not None else None,
+        "revenue_30d_myr": parse_money(field("近30日销售额", "30d revenue"), require_currency=True),
+        "total_sales_estimate": parse_compact_count(field("总销量", "total sales")),
+        "gmv_estimate_myr": parse_money(field("GMV"), require_currency=True),
+    }
+    if not any(
+        result.get(key) not in (None, "")
+        for key in result
+        if key not in {"provider", "source", "estimated", "item_id"}
+    ):
+        return None
+    return result
+
+
 class MarketplaceAdapter:
     platform: str
     blocked_hosts: tuple[str, ...] = ()
@@ -246,7 +347,37 @@ class ShopeeMalaysiaAdapter(MarketplaceAdapter):
           return cards.map((card, pageIndex) => {
           const a = card.querySelector('a[href*="-i."]');
           if (!a) return null;
-          const text = (card?.innerText || a.innerText || '').trim();
+          const shopdoraRoot = card.querySelector('#shopdora-list[data-itemid], #shopdora-list');
+          const shopdoraFields = {};
+          let lastShopdoraLabel = null;
+          let pendingShopdoraLabel = null;
+          for (const row of Array.from(shopdoraRoot?.querySelectorAll('.shopdora-list-item-info-item') || [])) {
+            const label = (row.querySelector('.shopdora-list-item-info-item-title')?.innerText || '').trim();
+            const value = (row.querySelector('.shopdora-list-item-info-item-main')?.innerText || '').trim();
+            if (label) {
+              lastShopdoraLabel = label;
+              pendingShopdoraLabel = value ? null : label;
+              if (value) shopdoraFields[label] = [shopdoraFields[label], value].filter(Boolean).join('\n');
+            } else if (value && (pendingShopdoraLabel || lastShopdoraLabel)) {
+              const target = pendingShopdoraLabel || lastShopdoraLabel;
+              shopdoraFields[target] = [shopdoraFields[target], value].filter(Boolean).join('\n');
+              pendingShopdoraLabel = null;
+            }
+          }
+          const shopdora = shopdoraRoot ? {
+            item_id: shopdoraRoot.getAttribute('data-itemid') || null,
+            seller_type: (shopdoraRoot.querySelector('.sellerSourceTips')?.innerText || '').trim() || null,
+            fields: shopdoraFields,
+          } : null;
+          const fullText = (card?.innerText || a.innerText || '').trim();
+          const shopdoraTextBlocks = [
+            shopdoraRoot,
+            ...Array.from(card.querySelectorAll('.shopdoraPirceList, .shopdoraPriceList')),
+          ].map(node => (node?.innerText || '').trim()).filter(Boolean);
+          const text = shopdoraTextBlocks.reduce(
+            (remaining, block) => remaining.replace(block, ''),
+            fullText,
+          ).trim();
           const lines = text.split('\n').map(x => x.trim()).filter(Boolean);
           const image = card?.querySelector('img');
           const imageCandidates = [
@@ -268,7 +399,7 @@ class ShopeeMalaysiaAdapter(MarketplaceAdapter):
           }).find(Boolean) || null;
           const href = a.href;
           const id = href.match(/-i\.(\d+)\.(\d+)/);
-          const title = a.getAttribute('aria-label') || a.title || lines[0] || '';
+          const title = lines[0] || a.title || a.getAttribute('aria-label') || '';
           const ratingNode = card?.querySelector('img[alt*="rating-star" i], [aria-label*="rating" i], [aria-label*="star" i], [class*="rating" i]');
           const ratingText = (ratingNode?.getAttribute('aria-label') || ratingNode?.textContent || '').trim();
           const ratingArea = ratingNode ? (ratingNode.parentElement?.innerText || '') : '';
@@ -293,7 +424,9 @@ class ShopeeMalaysiaAdapter(MarketplaceAdapter):
             image: imageUrl, price, sold, rating, reviews,
             seller: null, location,
             sponsored: /sponsored|iklan|广告|廣告/i.test(text), shop_id: id?.[1] || null,
-            item_id: id?.[2] || null, page_position: pageIndex + 1, page_size: pageSize};
+            item_id: id?.[2] || null, page_position: pageIndex + 1, page_size: pageSize,
+            shopdora_plugin_present: Boolean(shopdoraRoot || document.querySelector('#shopdora-icon, .ShopDoraIcon')),
+            shopdora};
           }).filter(Boolean);
         }"""
 
@@ -319,6 +452,8 @@ class ShopeeMalaysiaAdapter(MarketplaceAdapter):
             parse_money(raw.get("price")) if raw.get("price") else parse_money(text, require_currency=True)
         )
         image_url = _safe_image_url(raw.get("image"))
+        raw_data = _sanitized_raw_data(raw)
+        raw_data["shopdora"] = normalize_shopdora_data(raw.get("shopdora"), item_id)
         return MarketplaceListing(
             platform=self.platform,
             item_id=item_id,
@@ -335,7 +470,7 @@ class ShopeeMalaysiaAdapter(MarketplaceAdapter):
             is_sponsored=bool(raw.get("sponsored")) if raw.get("sponsored") is not None else None,
             search_rank=rank,
             data_quality=_quality(raw),
-            raw_data=_sanitized_raw_data(raw),
+            raw_data=raw_data,
         )
 
 
