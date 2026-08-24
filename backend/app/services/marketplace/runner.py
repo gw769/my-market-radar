@@ -66,7 +66,7 @@ _EXTENSION_ATTACH_RETRY_SECONDS = 40.0
 _PAGE_POLL_INTERVAL_SECONDS = 0.8
 _PAGE_MAX_SECONDS = 60.0
 _PAGE_NAVIGATION_MAX_SECONDS = 12.0
-_PAGE_FIRST_RESULTS_MAX_SECONDS = 35.0
+_PAGE_FIRST_RESULTS_MAX_SECONDS = 30.0
 _PAGE_TARGET_STABLE_ROUNDS = 4
 _PAGE_BOTTOM_STABLE_ROUNDS = 4
 _PAGE_STATE_EXPRESSION = r"""(() => {
@@ -987,6 +987,7 @@ async def _collect_resident_tab(
                 "completion_reason": "",
                 "raw_count": 0,
                 "parsed_count": 0,
+                "page_retry_count": 0,
                 "ready_state": "",
                 "visibility_state": "",
             }
@@ -1109,35 +1110,102 @@ async def _collect_resident_tab(
                     _PAGE_FIRST_RESULTS_MAX_SECONDS,
                     # Shopee may render sixty placeholders immediately but hydrate the first
                     # fifteen real links only after twenty-plus seconds when Shopdora is active.
-                    max(3.0, page_window * 0.58),
+                    # Keep roughly half of the absolute page window available for one bounded
+                    # same-URL reload when the placeholders never hydrate.
+                    max(3.0, page_window * 0.50),
                 )
                 first_deadline = min(page_deadline, time.monotonic() + first_budget)
                 stale_grid_seen = False
                 current_cards: list[dict[str, Any]] = []
-                while time.monotonic() < first_deadline:
-                    heartbeat()
-                    await asyncio.sleep(_PAGE_POLL_INTERVAL_SECONDS)
-                    page_state = await observe_page()
-                    current_url = str(page_state.get("href") or current_url)
-                    body_text = str(page_state.get("bodyText") or body_text)
-                    if adapter.is_verification_page(current_url, body_text):
-                        return verification_result()
-                    if not _search_page_url_matches(adapter, page_url, current_url):
-                        continue
-                    if page_state.get("visibilityState") != "visible":
-                        await call("Page.bringToFront")
-                        continue
-                    current_cards = await extract_cards()
-                    current_keys = _raw_keys(current_cards)
-                    if _grid_is_stale(current_keys, previous_page_keys):
-                        stale_grid_seen = True
-                        continue
-                    candidate = RawCardAccumulator(max_cards=max(100, limit * 4))
-                    candidate.add(current_cards)
-                    if adapter.parse_cards(candidate.cards(), limit):
-                        page_raw.add(current_cards)
-                        first_results_ready = True
-                        break
+
+                async def wait_for_first_grid(deadline: float) -> str:
+                    nonlocal page_state, current_url, body_text, current_cards
+                    nonlocal stale_grid_seen, first_results_ready
+                    while time.monotonic() < deadline:
+                        heartbeat()
+                        await asyncio.sleep(_PAGE_POLL_INTERVAL_SECONDS)
+                        page_state = await observe_page()
+                        current_url = str(page_state.get("href") or current_url)
+                        body_text = str(page_state.get("bodyText") or body_text)
+                        if adapter.is_verification_page(current_url, body_text):
+                            return "verification"
+                        if not _search_page_url_matches(adapter, page_url, current_url):
+                            continue
+                        if page_state.get("visibilityState") != "visible":
+                            await call("Page.bringToFront")
+                            continue
+                        current_cards = await extract_cards()
+                        current_keys = _raw_keys(current_cards)
+                        if _grid_is_stale(current_keys, previous_page_keys):
+                            stale_grid_seen = True
+                            continue
+                        candidate = RawCardAccumulator(max_cards=max(100, limit * 4))
+                        candidate.add(current_cards)
+                        if adapter.parse_cards(candidate.cards(), limit):
+                            page_raw.add(current_cards)
+                            first_results_ready = True
+                            return "ready"
+                    return "empty"
+
+                first_grid_state = await wait_for_first_grid(first_deadline)
+                if first_grid_state == "verification":
+                    return verification_result()
+
+                # A Shopee route can mount sixty placeholders yet never hydrate product links.
+                # Reload the same confirmed URL once and spend only the remaining absolute page
+                # budget. This is bounded, preserves earlier pages, and avoids an infinite retry.
+                if not first_results_ready and time.monotonic() + 5.0 < page_deadline:
+                    diagnostic["page_retry_count"] = 1
+                    reload_nonce = f"{document_nonce}:reload:{uuid.uuid4().hex}"
+                    await call(
+                        "Runtime.evaluate",
+                        {
+                            "expression": (
+                                "window.__MY_MARKET_RADAR_DOCUMENT_NONCE__ = "
+                                f"{json.dumps(reload_nonce)}; true"
+                            ),
+                            "returnByValue": True,
+                        },
+                    )
+                    await call("Page.reload", {"ignoreCache": False})
+                    await call("Page.bringToFront")
+                    reload_navigation_confirmed = False
+                    reload_navigation_deadline = min(
+                        page_deadline,
+                        time.monotonic() + _PAGE_NAVIGATION_MAX_SECONDS,
+                    )
+                    while time.monotonic() < reload_navigation_deadline:
+                        heartbeat()
+                        await asyncio.sleep(_PAGE_POLL_INTERVAL_SECONDS)
+                        page_state = await observe_page()
+                        current_url = str(page_state.get("href") or current_url)
+                        body_text = str(page_state.get("bodyText") or body_text)
+                        if adapter.is_verification_page(current_url, body_text):
+                            return verification_result()
+                        visible = page_state.get("visibilityState") == "visible"
+                        ready = page_state.get("readyState") in {"interactive", "complete"}
+                        reloaded_document = (
+                            str(page_state.get("collectorDocumentNonce") or "")
+                            != reload_nonce
+                        )
+                        if (
+                            visible
+                            and ready
+                            and reloaded_document
+                            and _search_page_url_matches(adapter, page_url, current_url)
+                        ):
+                            reload_navigation_confirmed = True
+                            break
+                        if not visible:
+                            await call("Page.bringToFront")
+                    if reload_navigation_confirmed:
+                        await call(
+                            "Runtime.evaluate",
+                            {"expression": "window.scrollTo(0, 0); true", "returnByValue": True},
+                        )
+                        first_grid_state = await wait_for_first_grid(page_deadline)
+                        if first_grid_state == "verification":
+                            return verification_result()
 
                 if not first_results_ready:
                     if stale_grid_seen:

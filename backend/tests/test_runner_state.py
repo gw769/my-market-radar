@@ -822,7 +822,7 @@ class RunnerPageCollectionTests(unittest.IsolatedAsyncioTestCase):
     def test_page_wait_budgets_allow_cold_load_but_remain_bounded(self):
         self.assertEqual(runner._PAGE_MAX_SECONDS, 60.0)
         self.assertEqual(runner._PAGE_NAVIGATION_MAX_SECONDS, 12.0)
-        self.assertEqual(runner._PAGE_FIRST_RESULTS_MAX_SECONDS, 35.0)
+        self.assertEqual(runner._PAGE_FIRST_RESULTS_MAX_SECONDS, 30.0)
         self.assertEqual(runner._PAGE_TARGET_STABLE_ROUNDS, 4)
         self.assertEqual(runner._PAGE_BOTTOM_STABLE_ROUNDS, 4)
 
@@ -1603,6 +1603,97 @@ class RunnerPageCollectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(diagnostics[0]["completion_reason"], "target_count_stable")
         self.assertTrue(diagnostics[0]["first_results_ready"])
         self.assertTrue(diagnostics[0]["dom_stable"])
+
+    async def test_empty_shopee_grid_reloads_once_and_keeps_the_absolute_page_deadline(self):
+        adapter = runner.ADAPTERS["shopee"]
+        cards = [shopee_card("reload-1", "Nail Sticker A"), shopee_card("reload-2", "Nail Sticker B")]
+        state = {
+            "url": "",
+            "reloaded": False,
+            "reloads": 0,
+            "empty_extractions": 0,
+            "clock": 0.0,
+        }
+
+        class FakeExtensionSocket:
+            def __init__(self, _platform: str, _url: str, _lock_key: str):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, _exc_type, _exc, _tb):
+                return None
+
+        async def fake_cdp_call(_socket, _request_id, method, params=None):
+            params = params or {}
+            if method in {"Page.enable", "Runtime.enable", "Page.bringToFront"}:
+                return {}
+            if method == "Page.navigate":
+                state["url"] = params["url"]
+                return {}
+            if method == "Page.reload":
+                state["reloads"] += 1
+                state["reloaded"] = True
+                return {}
+            expression = params.get("expression", "")
+            if expression.startswith("window.__MY_MARKET_RADAR_DOCUMENT_NONCE__ ="):
+                return {"result": {"value": True}}
+            if "my-market-radar-page-state" in expression:
+                return {"result": {"value": {
+                    "href": state["url"],
+                    "readyState": "complete",
+                    "visibilityState": "visible",
+                    "collectorDocumentNonce": "",
+                    "bodyText": "Nail Sticker results",
+                    "scrollY": 0,
+                    "scrollHeight": 1000,
+                    "atBottom": False,
+                }}}
+            if expression == "window.scrollTo(0, 0); true":
+                return {"result": {"value": True}}
+            if "document.querySelectorAll" in expression:
+                if not state["reloaded"]:
+                    state["empty_extractions"] += 1
+                    return {"result": {"value": []}}
+                return {"result": {"value": cards}}
+            self.fail(f"unexpected CDP call: {method} {expression}")
+
+        async def no_sleep(_seconds):
+            return None
+
+        def advancing_clock():
+            state["clock"] += 0.2
+            return state["clock"]
+
+        with (
+            patch.object(runner.settings, "BROWSER_MODE", "extension"),
+            patch.object(runner, "_PAGE_FIRST_RESULTS_MAX_SECONDS", 2.0),
+            patch.object(runner, "_ExtensionCDPSocket", FakeExtensionSocket),
+            patch.object(runner, "_cdp_call", fake_cdp_call),
+            patch.object(runner, "_require_lease"),
+            patch.object(runner.asyncio, "sleep", no_sleep),
+            patch.object(runner.time, "monotonic", advancing_clock),
+        ):
+            _url, _body, raw_cards, listings, warnings, diagnostics = (
+                await runner._collect_resident_tab(
+                    adapter,
+                    "指甲贴",
+                    limit=2,
+                    search_pages=1,
+                    run_id=85,
+                    worker_id="test-worker",
+                )
+            )
+
+        self.assertGreater(state["empty_extractions"], 0)
+        self.assertEqual(state["reloads"], 1)
+        self.assertEqual([listing.item_id for listing in listings], ["reload-1", "reload-2"])
+        self.assertEqual(len(raw_cards), 2)
+        self.assertEqual(warnings, [])
+        self.assertEqual(diagnostics[0]["page_retry_count"], 1)
+        self.assertEqual(diagnostics[0]["completion_reason"], "target_count_stable")
+        self.assertLessEqual(diagnostics[0]["elapsed_ms"], runner._PAGE_MAX_SECONDS * 1000)
 
     async def test_navigation_ignores_old_captcha_dom_until_target_url_arrives(self):
         adapter = runner.ADAPTERS["shopee"]
