@@ -31,10 +31,15 @@ export interface KeywordLocalization {
   keyword: string; search_term: string; aliases: string[];
   source: "deterministic" | "ai" | string; model?: string | null;
 }
+export interface AINextStep {
+  stage: "先核验" | "小规模测试" | "上线准备" | "持续复盘" | string;
+  title: string; why: string; tasks: string[]; watch: string;
+}
 export interface AIInsight {
   status: "completed" | "unavailable" | "disabled" | string;
   model?: string | null; generated_at?: string; summary?: string;
   findings?: string[]; risks?: string[]; actions?: string[];
+  next_steps?: AINextStep[];
   message?: string; score_changed?: boolean; evidence_scope?: string;
 }
 export interface Keyword {

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Activity, AlertCircle, ArrowRight, CheckCircle2, Gauge, LoaderCircle, RefreshCw, Sparkles } from "lucide-react";
+import { Activity, AlertCircle, ArrowRight, CheckCircle2, Eye, Gauge, LoaderCircle, RefreshCw, Sparkles } from "lucide-react";
 import { apiGet } from "@/lib/api";
 import { useKeywordSummaries } from "@/hooks/useKeywordSummaries";
 import type { AIInsight, KeywordLocalization, OpportunitySegment, PlatformScore, Run } from "@/types";
@@ -95,6 +95,7 @@ export default function AIAnalysis() {
   const evidence = analysis.evidence || null;
   const collector = analysis.collector_health || null;
   const aiInsight = (analysis.ai || null) as AIInsight | null;
+  const aiNextSteps = aiInsight?.status === "completed" ? (aiInsight.next_steps || []) : [];
   const localization = (analysis.request_config?.localization || null) as KeywordLocalization | null;
   const showingOlderResult = Boolean(latestRun && stableRunId && latestRun.id !== stableRunId);
   const loading = keywordsLoading || runLoading || Boolean(stableRunId && loadedRunId !== stableRunId);
@@ -239,12 +240,32 @@ export default function AIAnalysis() {
         </div>
       </section>}
 
-      <section className="panel recommendation-panel">
-        <div className="panel-title"><div><span>ACTION NOTES</span><h3>下一步建议</h3></div><Sparkles /></div>
-        <div className="recommendation-list">
-          {(analysis.recommendations || []).map((text: string, i: number) => <article key={i}><CheckCircle2 /><span>{text}</span><ArrowRight /></article>)}
+      <section className={`panel recommendation-panel ${aiNextSteps.length ? "ai-action-plan" : ""}`}>
+        <div className="panel-title">
+          <div><span>{aiNextSteps.length ? "AI-GUIDED VALIDATION ROUTE" : "RULE-GUIDED FALLBACK"}</span><h3>下一步建议</h3></div>
+          <div className="ai-plan-stamp"><Sparkles /><span>{aiNextSteps.length ? `${aiInsight?.model} 生成` : "规则建议"}</span></div>
         </div>
-        <div className="method-note"><AlertCircle /> 机会分不是利润预测；下单前仍需核算采购、物流、平台费用、广告成本，并确认被拆分的商品族在供应链上确实可独立销售。</div>
+        {aiNextSteps.length ? <>
+          <p className="ai-plan-intro">这不是通用待办清单，而是 AI 根据本轮平台差异、证据缺口和商品族信号整理的验证顺序。每一步都要求留下可以复盘的证据。</p>
+          <div className="ai-action-roadmap">
+            {aiNextSteps.map((step, index) => <article className="ai-action-step" key={`${step.stage}-${step.title}-${index}`}>
+              <header><b>{String(index + 1).padStart(2, "0")}</b><span>{step.stage}</span></header>
+              <h4>{step.title}</h4>
+              <p>{step.why}</p>
+              <ul>{step.tasks.map((task, taskIndex) => <li key={`${task}-${taskIndex}`}><CheckCircle2 /><span>{task}</span></li>)}</ul>
+              <div className="ai-watch"><Eye /><span><strong>复盘时看什么</strong>{step.watch}</span></div>
+            </article>)}
+          </div>
+          {(analysis.recommendations || []).length > 0 && <details className="rule-basis">
+            <summary>查看规则引擎给出的评分依据</summary>
+            <div className="recommendation-list">
+              {(analysis.recommendations || []).map((text: string, i: number) => <article key={i}><CheckCircle2 /><span>{text}</span><ArrowRight /></article>)}
+            </div>
+          </details>}
+        </> : <div className="recommendation-list">
+          {(analysis.recommendations || []).map((text: string, i: number) => <article key={i}><CheckCircle2 /><span>{text}</span><ArrowRight /></article>)}
+        </div>}
+        <div className="method-note"><AlertCircle /> AI 负责把证据转成验证路线，不负责批准下单。机会分不是利润预测；采购、物流、平台费、广告、退货和真实毛利仍需人工核算。</div>
       </section>
     </> : null}
   </div>;

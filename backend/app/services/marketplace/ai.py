@@ -257,8 +257,19 @@ def _insight_evidence(analysis: dict[str, Any]) -> dict[str, Any]:
         platforms[str(name)] = {
             "score": _compact_number(value.get("score")),
             "verdict": value.get("verdict"),
+            "eligible": bool(value.get("eligible")),
             "confidence": _compact_number(value.get("confidence")),
             "sample_size": _compact_number(value.get("sample_size")),
+            "raw_sample_size": _compact_number(value.get("raw_sample_size")),
+            "exclusion_breakdown": {
+                key: _compact_number(count)
+                for key, count in (value.get("exclusion_breakdown") or {}).items()
+            },
+            "eligibility_reasons": list(value.get("eligibility_reasons") or [])[:4],
+            "coverage": {
+                key: _compact_number(coverage)
+                for key, coverage in (value.get("coverage") or {}).items()
+            },
             "dimensions": {
                 key: _compact_number(score)
                 for key, score in (value.get("dimensions") or {}).items()
@@ -266,8 +277,9 @@ def _insight_evidence(analysis: dict[str, Any]) -> dict[str, Any]:
             "metrics": {
                 key: _compact_number((value.get("metrics") or {}).get(key))
                 for key in (
-                    "median_price", "median_sold", "median_reviews", "average_rating",
-                    "sponsored_share", "seller_concentration",
+                    "median_price", "min_price", "max_price", "price_dispersion",
+                    "median_sold", "median_reviews", "average_rating", "sponsored_share",
+                    "seller_count", "seller_concentration",
                 )
             },
         }
@@ -275,8 +287,13 @@ def _insight_evidence(analysis: dict[str, Any]) -> dict[str, Any]:
         {
             "label": item.get("label"),
             "score": _compact_number(item.get("opportunity_score")),
+            "confidence": _compact_number(item.get("confidence")),
+            "ranking_reliability": _compact_number(item.get("ranking_reliability")),
             "sample_size": _compact_number(item.get("sample_size")),
+            "share": _compact_number(item.get("share")),
+            "platform_coverage": _compact_number(item.get("platform_coverage")),
             "median_price": _compact_number(item.get("median_price")),
+            "seller_concentration": _compact_number(item.get("seller_concentration")),
         }
         for item in (analysis.get("opportunity_segments") or [])[:3]
         if isinstance(item, dict)
@@ -288,9 +305,16 @@ def _insight_evidence(analysis: dict[str, Any]) -> dict[str, Any]:
         "verdict": analysis.get("verdict"),
         "confidence": _compact_number(analysis.get("confidence")),
         "evidence_grade": evidence.get("grade"),
+        "evidence_reasons": list(evidence.get("reasons") or [])[:4],
+        "collector_health": _compact_number(evidence.get("collector_health")),
         "sample_total": _compact_number(evidence.get("sample_total")),
         "platforms": platforms,
         "top_segments": segments,
+        "rule_observations": _unique_texts(
+            analysis.get("recommendations") or [],
+            limit=6,
+            max_length=260,
+        ),
     }
 
 
@@ -312,9 +336,28 @@ def generate_market_insights(
             "summary": {"type": "string"},
             "findings": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
             "risks": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
-            "actions": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
+            "next_steps": {
+                "type": "array",
+                "minItems": 3,
+                "maxItems": 3,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "stage": {
+                            "type": "string",
+                            "enum": ["先核验", "小规模测试", "上线准备", "持续复盘"],
+                        },
+                        "title": {"type": "string", "pattern": "^[^0-9]*$"},
+                        "why": {"type": "string", "pattern": "^[^0-9]*$"},
+                        "task": {"type": "string", "pattern": "^[^0-9]*$"},
+                        "watch": {"type": "string", "pattern": "^[^0-9]*$"},
+                    },
+                    "required": ["stage", "title", "why", "task", "watch"],
+                    "additionalProperties": False,
+                },
+            },
         },
-        "required": ["summary", "findings", "risks", "actions"],
+        "required": ["summary", "findings", "risks", "next_steps"],
         "additionalProperties": False,
     }
     result = _chat_json(
@@ -323,7 +366,13 @@ def generate_market_insights(
             "evidence in concise Simplified Chinese. The deterministic score and verdict are final: "
             "never change them. Never invent sales, profit, cost, conversion, demand, market share, "
             "or numeric claims. Do not promise profitability. Give testable actions, and explicitly "
-            "say evidence is insufficient when the verdict says so."
+            "say evidence is insufficient when the verdict says so. Produce a tailored staged action "
+            "plan of exactly three steps: connect each step to supplied platform, segment, coverage, "
+            "or evidence signals; state one concrete compound task and what the operator should record. "
+            "Use no digits and no written-number quantities or durations anywhere in next_steps. Never invent time periods, "
+            "budgets, quantities, MOQ, targets, or thresholds. When cost, conversion, refund, or margin "
+            "data is absent, instruct the operator to measure it instead of estimating it. Never compare "
+            "sold counts directly across platforms. Avoid generic advice that could fit any product."
         ),
         user=(
             "Interpret this bounded evidence JSON. Every numeric claim must already appear in it.\n"
@@ -337,9 +386,34 @@ def generate_market_insights(
     summary = _unique_texts([result.get("summary")], limit=1, max_length=360)
     findings = _unique_texts(result.get("findings") or [], limit=3, max_length=260)
     risks = _unique_texts(result.get("risks") or [], limit=3, max_length=260)
-    actions = _unique_texts(result.get("actions") or [], limit=3, max_length=260)
-    texts = [*summary, *findings, *risks, *actions]
-    if not summary or not actions:
+    next_steps: list[dict[str, Any]] = []
+    for raw_step in result.get("next_steps") or []:
+        if not isinstance(raw_step, dict):
+            continue
+        stage = _unique_texts([raw_step.get("stage")], limit=1, max_length=24)
+        title = _unique_texts([raw_step.get("title")], limit=1, max_length=90)
+        why = _unique_texts([raw_step.get("why")], limit=1, max_length=300)
+        task = _unique_texts([raw_step.get("task")], limit=1, max_length=260)
+        watch = _unique_texts([raw_step.get("watch")], limit=1, max_length=260)
+        if not stage or not title or not why or not task or not watch:
+            continue
+        next_steps.append({
+            "stage": stage[0],
+            "title": title[0],
+            "why": why[0],
+            "tasks": task,
+            "watch": watch[0],
+        })
+        if len(next_steps) >= 3:
+            break
+    actions = [step["tasks"][0] for step in next_steps]
+    step_texts = [
+        text
+        for step in next_steps
+        for text in (step["stage"], step["title"], step["why"], *step["tasks"], step["watch"])
+    ]
+    texts = [*summary, *findings, *risks, *actions, *step_texts]
+    if not summary or len(next_steps) != 3:
         raise MarketplaceAIError("AI 分析内容不完整")
     unsupported = _unsupported_numbers(texts, evidence)
     if unsupported:
@@ -352,6 +426,7 @@ def generate_market_insights(
         "findings": findings,
         "risks": risks,
         "actions": actions,
+        "next_steps": next_steps,
         "score_changed": False,
         "evidence_scope": "aggregated_public_fields_only",
     }

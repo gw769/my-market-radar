@@ -157,10 +157,65 @@ class MarketplaceAITests(unittest.TestCase):
                 "findings": [],
                 "risks": [],
                 "actions": ["先验证供应链。"],
+                "next_steps": [
+                    {
+                        "stage": stage,
+                        "title": "核验商品",
+                        "why": "需要确认公开样本。",
+                        "task": "检查商品页面并记录缺失字段。",
+                        "watch": "观察公开字段是否完整。",
+                    }
+                    for stage in ("先核验", "小规模测试", "持续复盘")
+                ],
             },
         ):
             with self.assertRaises(ai.MarketplaceAIError):
                 ai.generate_market_insights(analysis)
+
+    def test_ai_insight_returns_structured_next_steps_without_changing_score(self):
+        analysis = {
+            "keyword": "毛巾",
+            "opportunity_score": 66.5,
+            "verdict": "谨慎观察",
+            "confidence": 85.6,
+            "evidence": {"grade": "A", "sample_total": 111, "collector_health": 99.3},
+            "platform_scores": {},
+            "opportunity_segments": [],
+            "recommendations": ["先核验价格带。"],
+        }
+        raw_steps = [
+            {
+                "stage": stage,
+                "title": title,
+                "why": "当前公开证据支持继续验证。",
+                "task": "复核目标商品并记录真实成本。",
+                "watch": "观察成本与公开信号是否一致。",
+            }
+            for stage, title in (
+                ("先核验", "核验搜索结果"),
+                ("小规模测试", "验证商品定位"),
+                ("持续复盘", "复盘新增证据"),
+            )
+        ]
+        with patch.object(
+            ai,
+            "_chat_json",
+            return_value={
+                "summary": "机会分为 66.5，当前应谨慎观察。",
+                "findings": ["证据等级为 A。"],
+                "risks": ["真实成本仍缺失。"],
+                "next_steps": raw_steps,
+            },
+        ) as chat:
+            result = ai.generate_market_insights(analysis)
+
+        step_schema = chat.call_args.kwargs["schema"]["properties"]["next_steps"]["items"]
+        self.assertEqual(step_schema["properties"]["task"]["pattern"], "^[^0-9]*$")
+        self.assertEqual(len(result["next_steps"]), 3)
+        self.assertEqual(result["next_steps"][0]["tasks"], [raw_steps[0]["task"]])
+        self.assertEqual(result["actions"], [step["task"] for step in raw_steps])
+        self.assertFalse(result["score_changed"])
+        self.assertEqual(analysis["opportunity_score"], 66.5)
 
 
 if __name__ == "__main__":

@@ -98,8 +98,6 @@ def build_report(db: Session, run: AnalysisRun) -> BytesIO:
             f"{health.get('status', 'unknown')}；健康度 {health.get('health_score', 0)}%；"
             f"raw {health.get('raw_count', 0)} → parsed {health.get('parsed_count', 0)}；{warnings}",
         ])
-    for recommendation in analysis.get("recommendations", []):
-        _append(summary, ["建议", recommendation])
     ai = analysis.get("ai") or {}
     if ai.get("status") == "completed":
         _append(summary, ["AI 辅助解读", ai.get("summary") or "—"])
@@ -109,6 +107,19 @@ def build_report(db: Session, run: AnalysisRun) -> BytesIO:
             _append(summary, ["AI 风险", risk])
         for action in ai.get("actions") or []:
             _append(summary, ["AI 行动", action])
+        for index, step in enumerate(ai.get("next_steps") or [], 1):
+            if not isinstance(step, dict):
+                continue
+            _append(summary, [
+                f"AI 路线 {index} · {step.get('stage') or '下一步'}",
+                step.get("title") or "—",
+            ])
+            _append(summary, ["为什么现在做", step.get("why") or "—"])
+            for task in step.get("tasks") or []:
+                _append(summary, ["执行动作", task])
+            _append(summary, ["复盘观察项", step.get("watch") or "—"])
+    for recommendation in analysis.get("recommendations", []):
+        _append(summary, ["规则评分依据", recommendation])
     summary.column_dimensions["A"].width = 22
     summary.column_dimensions["B"].width = 100
 

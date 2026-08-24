@@ -75,6 +75,20 @@ class SnapshotAndReportTests(unittest.TestCase):
                 "max_results_per_platform": 60,
             },
             "recommendations": ["先小批量测试。"],
+            "ai": {
+                "status": "completed",
+                "summary": "先验证公开信号。",
+                "findings": ["价格带值得复核。"],
+                "risks": ["真实成本未知。"],
+                "actions": ["核验供应链。"],
+                "next_steps": [{
+                    "stage": "先核验",
+                    "title": "复核目标商品",
+                    "why": "公开数据只能支持继续验证。",
+                    "tasks": ["记录采购成本。", "核对商品规格。"],
+                    "watch": "复盘真实成本和规格是否可比。",
+                }],
+            },
         }
         db.add(ListingSnapshot(
             run_id=run.id, keyword_id=self.keyword_id, platform="lazada", item_id="l1",
@@ -99,6 +113,9 @@ class SnapshotAndReportTests(unittest.TestCase):
         self.assertIn("本次扫描配置", summary_labels)
         query_row = next(row for row in summary_rows if row[0].value == "平台实际搜索词")
         self.assertEqual(query_row[1].value, "water bottle")
+        self.assertIn("AI 路线 1 · 先核验", summary_labels)
+        self.assertIn("复盘观察项", summary_labels)
+        self.assertIn("规则评分依据", summary_labels)
         trend = workbook["每日价格与排名趋势"]
         self.assertEqual(trend.cell(2, 8).value, 24)
         self.assertEqual(trend.cell(2, 9).value, 2)
